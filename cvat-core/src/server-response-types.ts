@@ -8,7 +8,7 @@ import {
     ShapeType, StorageLocation, LabelType,
     ShareFileType, Source, TaskMode, TaskStatus,
     CloudStorageCredentialsType, CloudStorageProviderType, ObjectType,
-    DataStorageLocation,
+    DataStorageLocation, RQStatus,
 } from './enums';
 import { Camelized, CamelizedV2 } from './type-utils';
 
@@ -126,6 +126,7 @@ export interface SerializedTask {
     overlap: number | null;
     owner: SerializedUser;
     project_id: number | null;
+    project_name: string | null;
     guide_id: number | null;
     segment_size: number;
     size: number;
@@ -149,6 +150,7 @@ export interface SerializedJob {
     labels: { count: number; url: string };
     mode: TaskMode;
     project_id: number | null;
+    project_name: string | null;
     guide_id: number | null;
     stage: JobStage;
     state: JobState;
@@ -157,13 +159,14 @@ export interface SerializedJob {
     start_frame: number;
     stop_frame: number;
     task_id: number;
+    task_name: string;
     updated_date: string;
     created_date: string;
     url: string;
     source_storage: SerializedStorage | null;
     target_storage: SerializedStorage | null;
     parent_job_id: number | null;
-    consensus_replicas: number;
+    replicas_count: number;
 }
 
 export type AttrInputType = 'select' | 'radio' | 'checkbox' | 'number' | 'text';
@@ -174,6 +177,7 @@ export interface SerializedAttribute {
     default_value: string;
     values: string[];
     id?: number;
+    deleted?: boolean;
 }
 
 export interface SerializedLabel {
@@ -377,7 +381,6 @@ export interface SerializedQualityReportData {
 export interface SerializedConsensusSettingsData {
     id?: number;
     task?: number;
-    quorum?: number;
     iou_threshold?: number;
     descriptions?: Record<string, string>;
 }
@@ -423,6 +426,7 @@ export interface SerializedShape {
     group: number;
     frame: number;
     source: Source;
+    score?: number;
     attributes: { spec_id: number; value: string }[];
     elements: Omit<SerializedShape, 'elements'>[];
     occluded: boolean;
@@ -567,6 +571,7 @@ export interface SerializedRequest {
         task_id: number | null;
         project_id: number | null;
         function_id: string | null;
+        lightweight?: boolean | null;
     };
     progress?: number;
     result_url?: string;
@@ -576,6 +581,20 @@ export interface SerializedRequest {
     finished_date?: string;
     expiry_date?: string;
     owner: any;
+}
+
+export interface SerializedFunctionRequest {
+    id: string;
+    status: RQStatus;
+    enqueued: string;
+    started: string | null;
+    ended: string | null;
+    exc_info: string;
+    progress: number | null;
+    function: {
+        id: number | string;
+        task: number;
+    };
 }
 
 export interface SerializedJobValidationLayout {
@@ -590,5 +609,5 @@ export interface SerializedTaskValidationLayout extends SerializedJobValidationL
     disabled_frames?: number[];
 }
 
-export interface APIOrganizationMembersFilter extends APICommonFilterParams {}
+export type APIOrganizationMembersFilter = APICommonFilterParams;
 export type OrganizationMembersFilter = Camelized<APIOrganizationMembersFilter>;

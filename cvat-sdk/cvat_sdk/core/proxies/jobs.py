@@ -49,6 +49,7 @@ class Job(
         filename: StrPath,
         *,
         conv_mask_to_poly: bool | None = None,
+        import_mode: str | None = None,
         status_check_period: int | None = None,
         pbar: ProgressReporter | None = None,
     ):
@@ -63,6 +64,7 @@ class Job(
             filename,
             format_name,
             conv_mask_to_poly=conv_mask_to_poly,
+            import_mode=import_mode,
             url_params={"id": self.id},
             pbar=pbar,
             status_check_period=status_check_period,
@@ -76,7 +78,7 @@ class Job(
         *,
         quality: str | None = None,
     ) -> io.RawIOBase:
-        (_, response) = self.api.retrieve_data(
+        _, response = self.api.retrieve_data(
             self.id, number=frame_id, quality=quality, type="frame"
         )
         return io.BytesIO(response.data)
@@ -84,7 +86,7 @@ class Job(
     def get_preview(
         self,
     ) -> io.RawIOBase:
-        (_, response) = self.api.retrieve_preview(self.id)
+        _, response = self.api.retrieve_preview(self.id)
         return io.BytesIO(response.data)
 
     def download_frames(
@@ -124,7 +126,7 @@ class Job(
             im.save(outdir / outfile)
 
     def get_meta(self) -> models.IDataMetaRead:
-        (meta, _) = self.api.retrieve_data_meta(self.id)
+        meta, _ = self.api.retrieve_data_meta(self.id)
         return meta
 
     def get_labels(self) -> list[models.ILabel]:

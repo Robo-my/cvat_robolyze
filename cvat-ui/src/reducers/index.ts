@@ -4,18 +4,20 @@
 // SPDX-License-Identifier: MIT
 
 import { Canvas3d } from 'cvat-canvas3d/src/typescript/canvas3d';
-import { Canvas, RectDrawingMethod, CuboidDrawingMethod } from 'cvat-canvas-wrapper';
+import {
+    Canvas, RectDrawingMethod, CuboidDrawingMethod, RenderData,
+} from 'cvat-canvas-wrapper';
 import { OrientationVisibility } from 'cvat-canvas3d-wrapper';
 import {
     Webhook, MLModel, Organization, Job, Task, Project, Label, User,
     QualityConflict, FramesMetaData, RQStatus, Event, Invitation, SerializedAPISchema,
     Request, JobValidationLayout, QualitySettings, TaskValidationLayout, ObjectState,
     ConsensusSettings, AboutData, ShapeType, ObjectType, ApiToken,
-    Membership, AnnotationFormats,
+    Membership, AnnotationFormats, CloudStorage,
 } from 'cvat-core-wrapper';
-import { IntelligentScissors } from 'utils/opencv-wrapper/intelligent-scissors';
+
+import type { IntelligentScissors, OpenCVTracker } from 'utils/opencv-wrapper/opencv-wrapper';
 import { KeyMap, KeyMapItem } from 'utils/mousetrap-react';
-import { OpenCVTracker } from 'utils/opencv-wrapper/opencv-interfaces';
 import { ImageFilter } from 'utils/image-processing';
 
 export interface AuthState {
@@ -235,8 +237,6 @@ interface CloudStorageStatus {
     status: string | null;
 }
 
-export type CloudStorage = any;
-
 export interface CloudStoragesState {
     initialized: boolean;
     fetching: boolean;
@@ -301,17 +301,16 @@ export interface BulkActionsState {
 
 export enum SupportedPlugins {
     ANALYTICS = 'ANALYTICS',
-    MODELS = 'MODELS',
 }
 
 export type PluginsList = {
     [name in SupportedPlugins]: boolean;
 };
 
-export type CallbackReturnType = Promise<void | { preventJobStatusChange: boolean }>;
+export type CallbackReturnType = Promise<undefined | { preventJobStatusChange: boolean }>;
 
 export interface PluginComponent {
-    component: any;
+    component: any; // TODO: research correct plugin component type
     data: {
         weight: number;
         shouldBeRendered: (props?: object, state?: object) => boolean;
@@ -338,6 +337,11 @@ export interface PluginsState {
         };
     };
     overridableComponents: {
+        app: {
+            serverUnavailable: ((props: {
+                details: string | null;
+            }) => JSX.Element)[];
+        };
         annotationPage: {
             header: {
                 saveAnnotationButton: (() => JSX.Element)[];
@@ -448,7 +452,7 @@ export interface PluginsState {
 }
 
 export interface AboutState {
-    server: AboutData;
+    server: AboutData | null;
     packageVersion: {
         ui: string;
     };
@@ -788,7 +792,8 @@ export enum StatesOrdering {
     ID_DESCENT = 'ID - descent',
     ID_ASCENT = 'ID - ascent',
     UPDATED = 'Updated time',
-    Z_ORDER = 'Z Order',
+    LAYER = 'Layer',
+    LABEL_NAME = 'Label name',
 }
 
 export enum ContextMenuType {
@@ -880,7 +885,10 @@ export interface AnnotationState {
     };
     drawing: {
         activeInteractor?: MLModel | OpenCVTool;
-        activeInteractorParameters?: MLModel['params']['canvas'];
+        activeInteractorParameters: Partial<{
+            command: Parameters<Canvas['interact']>[0]['command'];
+            settings: Parameters<Canvas['interact']>[0]['settings'];
+        }>;
         activeShapeType: ShapeType | null;
         activeRectDrawingMethod?: RectDrawingMethod;
         activeCuboidDrawingMethod?: CuboidDrawingMethod;
@@ -888,6 +896,7 @@ export interface AnnotationState {
         activeLabelID: number | null;
         activeObjectType: ObjectType;
         activeInitialState?: any;
+        activeSimplifyPoly?: boolean;
     };
     editing: EditingState;
     annotations: {
@@ -899,6 +908,7 @@ export interface AnnotationState {
         collapsedAll: boolean;
         states: any[];
         filters: object[];
+        renderData: RenderData;
         resetGroupFlag: boolean;
         initialized: boolean;
         history: {
@@ -929,6 +939,10 @@ export interface AnnotationState {
     }
     propagate: {
         visible: boolean;
+    };
+    simplify: {
+        objectState: ObjectState | null;
+        originalPoints: number[] | null;
     };
     colors: any[];
     filtersPanelVisible: boolean;
@@ -991,6 +1005,7 @@ export interface WorkspaceSettingsState {
     autoSaveInterval: number; // in ms
     focusedObjectPadding: number;
     automaticBordering: boolean;
+    snapToPoint: boolean;
     adaptiveZoom: boolean;
     showObjectsTextAlways: boolean;
     showAllInterpolationTracks: boolean;

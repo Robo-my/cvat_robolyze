@@ -41,6 +41,45 @@ const objectAttributesAsList = (state: ObjectState): { spec_id: number, value: s
     }))
 );
 
+type LayerPlacement = { exact: number } | { before: number } | { after: number };
+type LayerPlacementData =
+    { kind: 'exact'; zOrder: number } |
+    { kind: 'before'; zOrder: number } |
+    { kind: 'after'; zOrder: number };
+
+function isLayerState(state: ObjectState): boolean {
+    return [ObjectType.SHAPE, ObjectType.TRACK].includes(state.objectType);
+}
+
+function parseLayerPlacement(placement: LayerPlacement): LayerPlacementData {
+    checkObjectType('placement', placement, null, { cls: Object, name: 'Object' });
+
+    const hasExact = Object.hasOwn(placement, 'exact');
+    const hasBefore = Object.hasOwn(placement, 'before');
+    const hasAfter = Object.hasOwn(placement, 'after');
+    const specifiedCount = Number(hasExact) + Number(hasBefore) + Number(hasAfter);
+
+    if (specifiedCount !== 1) {
+        throw new ArgumentError('Exactly one of "exact", "before", or "after" must be specified');
+    }
+
+    if (hasExact) {
+        const { exact: zOrder } = placement as { exact: number };
+        checkObjectType('placement exact', zOrder, 'integer', null);
+        return { kind: 'exact', zOrder };
+    }
+
+    if (hasBefore) {
+        const { before: zOrder } = placement as { before: number };
+        checkObjectType('placement before', zOrder, 'integer', null);
+        return { kind: 'before', zOrder };
+    }
+
+    const { after: zOrder } = placement as { after: number };
+    checkObjectType('placement after', zOrder, 'integer', null);
+    return { kind: 'after', zOrder };
+}
+
 const labelAttributesAsDict = (label: Label): Record<number, Attribute> => (
     label.attributes.reduce((accumulator, attribute) => {
         accumulator[attribute.id] = attribute;
@@ -68,12 +107,15 @@ export default class Collection {
         dimension: DimensionType;
         framesInfo: BasicInjection['framesInfo'];
         jobType: JobType;
+        replicasCount?: number;
     }) {
         this.stopFrame = data.stopFrame;
 
         this.labels = data.labels.reduce((labelAccumulator, label) => {
+            // eslint-disable-next-line no-param-reassign
             labelAccumulator[label.id] = label;
             (label?.structure?.sublabels || []).forEach((sublabel) => {
+                // eslint-disable-next-line no-param-reassign
                 labelAccumulator[sublabel.id] = sublabel;
             });
 
@@ -102,7 +144,100 @@ export default class Collection {
             nextClientID: () => ++config.globalObjectsCounter,
             getMasksOnFrame: (frame: number) => (this.shapes[frame] as MaskShape[])
                 .filter((object) => object instanceof MaskShape),
+            replicasCount: data.replicasCount,
         };
+    }
+
+    private _captureZOrderRestore(object: Shape | Track, frame: number): () => void {
+        if (object instanceof Track) {
+            const wasKeyframe = frame in object.shapes;
+            const shape = wasKeyframe ? object.shapes[frame] : undefined;
+            const { source } = object;
+
+            return (): void => {
+                object.source = source;
+                object.updated = Date.now();
+                if (shape) {
+                    object.shapes[frame] = shape;
+                } else {
+                    delete object.shapes[frame];
+                }
+            };
+        }
+
+        const { zOrder, source } = object;
+        return (): void => {
+            object.source = source;
+            object.updated = Date.now();
+            object.zOrder = zOrder;
+        };
+    }
+
+    private _applyZOrderUpdates(frame: number, zOrders: Map<number, number>): ObjectState[] {
+        const updatedStates: ObjectState[] = [];
+        const snapshots: {
+            clientID: number;
+            undo: () => void;
+            redo: () => void;
+        }[] = [];
+
+        // Prevent each individual object.save() from creating its own history item.
+        this.history.freeze(true);
+
+        try {
+            for (const [clientID, zOrder] of zOrders) {
+                const object = this.objects[clientID];
+                if (!(object instanceof Shape || object instanceof Track) || object.removed || object.lock) {
+                    throw new Error('Only non-removed and non-locked shapes and tracks can be reordered');
+                }
+
+                let currentState: ObjectState;
+                try {
+                    currentState = new ObjectState(object.get(frame));
+                } catch (error: unknown) {
+                    if (error instanceof InterpolationNotPossibleError) {
+                        continue;
+                    }
+                    throw error;
+                }
+
+                const previousZOrder = currentState.zOrder;
+                if (previousZOrder === zOrder) {
+                    continue;
+                }
+
+                const undo = this._captureZOrderRestore(object, frame);
+                currentState.zOrder = zOrder;
+                object.save(frame, currentState);
+                const redo = this._captureZOrderRestore(object, frame);
+
+                const updatedState = new ObjectState(object.get(frame));
+                snapshots.push({ clientID: object.clientID, undo, redo });
+                updatedStates.push(updatedState);
+            }
+        } catch (error: unknown) {
+            snapshots.forEach(({ undo }) => undo());
+            throw error;
+        } finally {
+            this.history.freeze(false);
+        }
+
+        if (snapshots.length) {
+            // Store the whole layer operation as one undo/redo item after all objects are updated.
+            this.history.do(
+                HistoryActions.CHANGED_ZORDER,
+                () => {
+                    snapshots.forEach(({ undo }) => undo());
+                },
+                () => {
+                    snapshots.forEach(({ redo }) => redo());
+                },
+                snapshots.map(({ clientID }) => clientID),
+                frame,
+            );
+        }
+
+        return updatedStates;
     }
 
     public import(data: Omit<SerializedCollection, 'version'>): {
@@ -334,7 +469,7 @@ export default class Collection {
                     keyframes[object.frame + 1].outside = true;
                     keyframes[object.frame + 1].frame++;
                     keyframes[object.frame + 1].attributes = [];
-                    (keyframes[object.frame + 1].elements || []).forEach((el) => {
+                    ((keyframes[object.frame + 1] as any).elements || []).forEach((el) => {
                         el.outside = keyframes[object.frame + 1].outside;
                         el.frame = keyframes[object.frame + 1].frame;
                     });
@@ -665,9 +800,8 @@ export default class Collection {
         return groupIdx;
     }
 
-    public join(objectStates: ObjectState[], points: number[]): void {
+    public join(objectStates: ObjectState[], points: number[][]): void {
         checkObjectType('shapes to join', objectStates, null, { cls: Array, name: 'Array' });
-        checkObjectType('joined rle mask', points, null, { cls: Array, name: 'Array' });
 
         if (objectStates.some((state, idx) => idx && state.frame !== objectStates[idx - 1].frame)) {
             throw new ArgumentError('All joined objects must be placed on the same frame');
@@ -684,15 +818,25 @@ export default class Collection {
                 throw new ArgumentError('The object has not been saved yet. Call annotations.put([state]) before');
             }
 
-            if (!(object instanceof MaskShape)) {
-                throw new ArgumentError('Only shape masks can be joined');
-            }
-
             return object;
         });
 
+        const isPolygonJoin = objectsToJoin[0] instanceof PolygonShape;
+        const isMaskJoin = objectsToJoin[0] instanceof MaskShape;
+
+        if (!isPolygonJoin && !isMaskJoin) {
+            throw new ArgumentError('Only polygons and masks can be joined');
+        }
+
+        if (isPolygonJoin && objectsToJoin.some((obj) => !(obj instanceof PolygonShape))) {
+            throw new ArgumentError('Cannot join polygons with other shape types');
+        }
+
+        if (isMaskJoin && objectsToJoin.some((obj) => !(obj instanceof MaskShape))) {
+            throw new ArgumentError('Cannot join masks with other shape types');
+        }
+
         if (objectsToJoin.length > 1) {
-            const rle = points;
             const labelAttributes = labelAttributesAsDict(objectsToJoin[0].label);
             const attrValues = validateAttributesList(objectAttributesAsList(objectStates[0]));
             for (const attr of attrValues) {
@@ -701,22 +845,31 @@ export default class Collection {
                 }
             }
 
-            // Append newly created object to the collection
-            const imported = this.import({
-                shapes: [{
+            const shapesToCreate = [];
+
+            for (const shapePoints of points) {
+                checkObjectType('joined shape points', shapePoints, null, { cls: Array, name: 'Array' });
+                const shapeType = isMaskJoin ? ShapeType.MASK : ShapeType.POLYGON;
+
+                shapesToCreate.push({
                     attributes: attrValues,
                     frame: objectsToJoin[0].frame,
                     group: 0,
                     label_id: objectsToJoin[0].label.id,
                     outside: false,
-                    occluded: objectsToJoin.some((object: MaskShape) => object.occluded),
-                    points: rle,
+                    occluded: objectsToJoin.some((object: any) => object.occluded),
+                    points: shapePoints,
                     rotation: 0,
-                    type: ShapeType.MASK,
-                    z_order: Math.max(...objectsToJoin.map((object: MaskShape) => object.zOrder)),
+                    type: shapeType,
+                    z_order: Math.max(...objectsToJoin.map((object: any) => object.zOrder)),
                     source: Source.MANUAL,
                     elements: [],
-                }],
+                });
+            }
+
+            // Append newly created object(s) to the collection
+            const imported = this.import({
+                shapes: shapesToCreate,
                 tracks: [],
                 tags: [],
             });
@@ -727,22 +880,29 @@ export default class Collection {
             }
 
             // handle history actions
-            const [importedShape] = imported.shapes;
+            const importedShapes = imported.shapes;
             this.history.do(
                 HistoryActions.JOINED_OBJECTS,
                 () => {
-                    importedShape.removed = true;
+                    for (const importedShape of importedShapes) {
+                        importedShape.removed = true;
+                    }
                     for (const object of objectsToJoin) {
                         object.removed = false;
                     }
                 },
                 () => {
-                    importedShape.removed = false;
+                    for (const importedShape of importedShapes) {
+                        importedShape.removed = false;
+                    }
                     for (const object of objectsToJoin) {
                         object.removed = true;
                     }
                 },
-                [...objectsToJoin.map((object) => object.clientID), importedShape.clientID],
+                [
+                    ...objectsToJoin.map((object) => object.clientID),
+                    ...importedShapes.map((shape) => shape.clientID),
+                ],
                 objectsToJoin[0].frame,
             );
         }
@@ -859,6 +1019,7 @@ export default class Collection {
                     if (delTrackKeyframesOnly) {
                         for (const keyframe of Object.keys(track.shapes)) {
                             if (+keyframe >= from && +keyframe <= to) {
+                                // eslint-disable-next-line no-param-reassign
                                 delete track.shapes[keyframe];
                                 if (track instanceof SkeletonTrack) {
                                     track.elements.forEach((element) => {
@@ -868,6 +1029,7 @@ export default class Collection {
                                         }
                                     });
                                 }
+                                // eslint-disable-next-line no-param-reassign
                                 track.updated = Date.now();
                             }
                         }
@@ -1167,21 +1329,22 @@ export default class Collection {
         }
 
         // Add constructed objects to a collection
-        // eslint-disable-next-line no-unsanitized/method
         const imported = this.import(constructed);
-        const importedArray = imported.tags.concat(imported.tracks).concat(imported.shapes);
+        const importedArray = ([] as (Tag | Track | Shape)[])
+            .concat(imported.tags, imported.tracks, imported.shapes);
         const additionalUndo = [];
         const additionalRedo = [];
         const additionalClientIDs = [];
         let globalEmptyMaskOccurred = false;
         for (const object of importedArray) {
-            if (object.shapeType === ShapeType.MASK && config.removeUnderlyingMaskPixels.enabled) {
+            if (object instanceof MaskShape && config.removeUnderlyingMaskPixels.enabled) {
                 const {
                     clientIDs,
                     emptyMaskOccurred,
                     undo: undoWithUnderlyingPixels,
                     redo: redoWithUnderlyingPixels,
-                } = (object as MaskShape).removeUnderlyingPixels(object.frame);
+                } = object.removeUnderlyingPixels(object.frame);
+
                 additionalUndo.push(undoWithUnderlyingPixels);
                 additionalRedo.push(redoWithUnderlyingPixels);
                 additionalClientIDs.push(clientIDs);
@@ -1218,6 +1381,112 @@ export default class Collection {
         }
 
         return importedArray.map((value) => value.clientID);
+    }
+
+    public updateLayer(frame: number, placement: LayerPlacement, objectStates: ObjectState[]): ObjectState[] {
+        const parsedPlacement = parseLayerPlacement(placement);
+        // Validate the public inputs before reading collection state or applying any changes.
+        checkObjectType('frame', frame, 'integer', null);
+        checkObjectType('object states', objectStates, null, { cls: Array, name: 'Array' });
+        objectStates.forEach((state) => {
+            checkObjectType('object state', state, null, { cls: ObjectState, name: 'ObjectState' });
+            if (state.frame !== frame) {
+                throw new ArgumentError('Object state frame must match the requested frame');
+            }
+        });
+
+        // Resolve requested IDs against the whole collection on the frame
+        // Ignore objects which cannot be moved (e.g. tags or locked)
+        // And perform the grouping by clientID and by layer
+        const {
+            clientId: visibleStatesByClientID,
+            layer: visibleStatesByLayer,
+        } = this.get(frame, false, []).reduce(
+            (accumulator, state) => {
+                if (!isLayerState(state) || state.lock) {
+                    return accumulator;
+                }
+
+                accumulator.clientId.set(state.clientID, state);
+                accumulator.layer.set(state.zOrder, accumulator.layer.get(state.zOrder) ?? []);
+                accumulator.layer.get(state.zOrder)?.push(state);
+                return accumulator;
+            }, {
+                clientId: new Map<number, ObjectState>(),
+                layer: new Map<number, ObjectState[]>(),
+            },
+        );
+
+        // Filter the requested states to move by visibility and existence on the frame
+        const requestedStatesClientIds = new Set(
+            objectStates.map((state) => state.clientID)
+                .filter((clientID): clientID is number => (
+                    Number.isInteger(clientID) && visibleStatesByClientID.has(clientID)
+                )),
+        );
+
+        const requestedStates = Array.from(requestedStatesClientIds)
+            .map((clientID) => visibleStatesByClientID.get(clientID));
+        if (!requestedStates.length) {
+            return [];
+        }
+
+        if (parsedPlacement.kind === 'exact') {
+            const exactUpdates = new Map<number, number>();
+            requestedStates.forEach((state) => {
+                exactUpdates.set(state.clientID, parsedPlacement.zOrder);
+            });
+            return this._applyZOrderUpdates(frame, exactUpdates);
+        }
+
+        const updates = new Map<number, number>();
+        const scheduleMove = (states: ObjectState[], zOrder: number): void => {
+            // Find the objects already occupying the target layer, excluding the current move batch.
+            const movingClientIDs = new Set(states.map((state) => state.clientID));
+            const displacedStates = (visibleStatesByLayer.get(zOrder) ?? []).filter((state) => (
+                !movingClientIDs.has(state.clientID) && !requestedStatesClientIds.has(state.clientID)
+            ));
+
+            if (displacedStates.length) {
+                // First make room deeper in the stack, then place this batch into the freed layer.
+                scheduleMove(displacedStates, zOrder + 1);
+            }
+
+            // Record the planned move after deeper layers are scheduled, but before any mutation occurs.
+            states.forEach((state) => {
+                updates.set(state.clientID as number, zOrder);
+            });
+        };
+
+        if (parsedPlacement.kind === 'before') {
+            scheduleMove(requestedStates, parsedPlacement.zOrder - 1);
+        } else if (parsedPlacement.kind === 'after') {
+            scheduleMove(requestedStates, parsedPlacement.zOrder + 1);
+        }
+
+        // Apply all scheduled changes at once to preserve a single batched undo/redo action.
+        return this._applyZOrderUpdates(frame, updates);
+    }
+
+    public compactLayers(frame: number): ObjectState[] {
+        checkObjectType('frame', frame, 'integer', null);
+
+        const allStates = this.get(frame, false, []).filter((state) => isLayerState(state) && !state.lock);
+        const zOrderMap = new Map(
+            Array.from(new Set(allStates.map((state: ObjectState): number => state.zOrder)))
+                .sort((left: number, right: number): number => left - right)
+                .map((zOrder: number, index: number): [number, number] => [zOrder, index]),
+        );
+
+        const zOrders = new Map<number, number>();
+        allStates.forEach((state) => {
+            const newZOrder = zOrderMap.get(state.zOrder) as number;
+            if (newZOrder !== state.zOrder) {
+                zOrders.set(state.clientID, newZOrder);
+            }
+        });
+
+        return this._applyZOrderUpdates(frame, zOrders);
     }
 
     public select(objectStates: ObjectState[], x: number, y: number): {
@@ -1376,7 +1645,10 @@ export default class Collection {
         }
 
         const filtersStr = JSON.stringify(annotationsFilters);
-        const linearSearch = filtersStr.match(/"var":"width"/) || filtersStr.match(/"var":"height"/);
+        const linearSearch = filtersStr.match(/"var":"width"/) ||
+            filtersStr.match(/"var":"height"/) ||
+            filtersStr.match(/"var":"rotation"/) ||
+            filtersStr.match(/"var":"zOrder"/);
 
         for (let frame = frameFrom; predicate(frame); frame = update(frame)) {
             if (!allowDeletedFrames && this.injection.framesInfo.isFrameDeleted(frame)) {

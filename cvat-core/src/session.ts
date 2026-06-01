@@ -3,8 +3,6 @@
 //
 // SPDX-License-Identifier: MIT
 
-import _ from 'lodash';
-
 import { ChunkQuality } from 'cvat-data';
 import {
     ChunkType, DimensionType, HistoryActions, JobStage,
@@ -40,7 +38,7 @@ function buildDuplicatedAPI(prototype) {
                     useDefaultLocation: boolean,
                     sourceStorage: Storage,
                     file: File | string,
-                    options?: { convMaskToPoly?: boolean },
+                    options?: { convMaskToPoly?: boolean, importMode?: 'replace' | 'append' },
                 ) {
                     const result = await PluginRegistry.apiWrapper.call(
                         this,
@@ -158,6 +156,26 @@ function buildDuplicatedAPI(prototype) {
                         prototype.annotations.slice,
                         objectState,
                         results,
+                    );
+                    return result;
+                },
+
+                async updateLayer(frame, placement, objectStates) {
+                    const result = await PluginRegistry.apiWrapper.call(
+                        this,
+                        prototype.annotations.updateLayer,
+                        frame,
+                        placement,
+                        objectStates,
+                    );
+                    return result;
+                },
+
+                async compactLayers(frame) {
+                    const result = await PluginRegistry.apiWrapper.call(
+                        this,
+                        prototype.annotations.compactLayers,
+                        frame,
                     );
                     return result;
                 },
@@ -359,8 +377,14 @@ export class Session {
         merge: (objectStates: ObjectState[]) => Promise<void>;
         split: (objectState: ObjectState, frame: number) => Promise<void>;
         group: (objectStates: ObjectState[], reset: boolean) => Promise<number>;
-        join: (objectStates: ObjectState[], points: number[]) => Promise<void>;
+        join: (objectStates: ObjectState[], points: number[][]) => Promise<void>;
         slice: (state: ObjectState, results: number[][]) => Promise<void>;
+        updateLayer: (
+            frame: number,
+            placement: { exact: number } | { before: number } | { after: number },
+            objectStates: ObjectState[],
+        ) => Promise<ObjectState[]>;
+        compactLayers: (frame: number) => Promise<ObjectState[]>;
         clear: (options?: {
             reload?: boolean;
             startFrame?: number;
@@ -388,6 +412,7 @@ export class Session {
             file: File | string,
             options?: {
                 convMaskToPoly?: boolean,
+                importMode?: 'replace' | 'append',
                 updateStatusCallback?: (s: string, n: number) => void,
             },
         ) => Promise<string>;
@@ -468,6 +493,8 @@ export class Session {
             group: Object.getPrototypeOf(this).annotations.group.bind(this),
             join: Object.getPrototypeOf(this).annotations.join.bind(this),
             slice: Object.getPrototypeOf(this).annotations.slice.bind(this),
+            updateLayer: Object.getPrototypeOf(this).annotations.updateLayer.bind(this),
+            compactLayers: Object.getPrototypeOf(this).annotations.compactLayers.bind(this),
             clear: Object.getPrototypeOf(this).annotations.clear.bind(this),
             search: Object.getPrototypeOf(this).annotations.search.bind(this),
             upload: Object.getPrototypeOf(this).annotations.upload.bind(this),
@@ -521,8 +548,10 @@ export class Job extends Session {
         stop_frame?: number;
         frame_count?: number;
         project_id: number | null;
+        project_name: string | null;
         guide_id: number | null;
-        task_id: number;
+        task_id: number | null;
+        task_name: string | null;
         labels: Label[];
         dimension?: DimensionType;
         data_compressed_chunk_type?: ChunkType;
@@ -534,7 +563,7 @@ export class Job extends Session {
         source_storage: Storage,
         target_storage: Storage,
         parent_job_id: number | null;
-        consensus_replicas: number;
+        replicas_count: number;
     };
 
     constructor(initialData: InitializerType) {
@@ -550,8 +579,10 @@ export class Job extends Session {
             stop_frame: undefined,
             frame_count: undefined,
             project_id: null,
+            project_name: null,
             guide_id: null,
             task_id: null,
+            task_name: null,
             labels: [],
             dimension: undefined,
             data_compressed_chunk_type: undefined,
@@ -563,7 +594,7 @@ export class Job extends Session {
             source_storage: undefined,
             target_storage: undefined,
             parent_job_id: null,
-            consensus_replicas: undefined,
+            replicas_count: undefined,
         };
 
         this.#data.id = initialData.id ?? this.#data.id;
@@ -572,6 +603,8 @@ export class Job extends Session {
         this.#data.stop_frame = initialData.stop_frame ?? this.#data.stop_frame;
         this.#data.frame_count = initialData.frame_count ?? this.#data.frame_count;
         this.#data.task_id = initialData.task_id ?? this.#data.task_id;
+        this.#data.task_name = initialData.task_name ?? this.#data.task_name;
+        this.#data.project_name = initialData.project_name ?? this.#data.project_name;
         this.#data.dimension = initialData.dimension ?? this.#data.dimension;
         this.#data.data_compressed_chunk_type =
             initialData.data_compressed_chunk_type ?? this.#data.data_compressed_chunk_type;
@@ -579,7 +612,7 @@ export class Job extends Session {
         this.#data.mode = initialData.mode ?? this.#data.mode;
         this.#data.created_date = initialData.created_date ?? this.#data.created_date;
         this.#data.parent_job_id = initialData.parent_job_id ?? this.#data.parent_job_id;
-        this.#data.consensus_replicas = initialData.consensus_replicas ?? this.#data.consensus_replicas;
+        this.#data.replicas_count = initialData.replicas_count ?? this.#data.replicas_count;
 
         if (Array.isArray(initialData.labels)) {
             this.#data.labels = initialData.labels.map((labelData) => {
@@ -675,8 +708,16 @@ export class Job extends Session {
         return this.#data.guide_id;
     }
 
-    public get taskId(): number {
+    public get taskId(): number | null {
         return this.#data.task_id;
+    }
+
+    public get taskName(): string | null {
+        return this.#data.task_name;
+    }
+
+    public get projectName(): string | null {
+        return this.#data.project_name;
     }
 
     public get dimension(): DimensionType {
@@ -687,8 +728,8 @@ export class Job extends Session {
         return this.#data.parent_job_id;
     }
 
-    public get consensusReplicas(): number {
-        return this.#data.consensus_replicas;
+    public get replicasCount(): number {
+        return this.#data.replicas_count;
     }
 
     public get dataChunkType(): ChunkType {
@@ -775,11 +816,12 @@ export class Job extends Session {
 export class Task extends Session {
     public name: string;
     public projectId: number | null;
+    public projectName: string | null;
     public organizationId: number | null;
     public assignee: User | null;
     public bugTracker: string;
     public subset: string;
-    public labels: Label[];
+    public readonly labels: Label[];
     public sourceStorage: Storage;
     public targetStorage: Storage;
     public readonly guideId: number | null;
@@ -818,6 +860,7 @@ export class Task extends Session {
     public readonly validationFramesPercent: number;
     public readonly validationFramesPerJobPercent: number;
     public readonly frameSelectionMethod: string;
+    public readonly _updateTrigger: FieldUpdateTrigger;
 
     public meta: {
         get: () => Promise<FramesMetaData>;
@@ -835,6 +878,7 @@ export class Task extends Session {
             id: undefined,
             name: undefined,
             project_id: null,
+            project_name: null,
             guide_id: undefined,
             organization_id: undefined,
             status: undefined,
@@ -867,7 +911,6 @@ export class Task extends Session {
             use_cache: undefined,
             copy_data: undefined,
             sorting_method: undefined,
-            files: undefined,
             consensus_enabled: undefined,
 
             validation_mode: null,
@@ -896,12 +939,6 @@ export class Task extends Session {
                 (initialData.progress?.validation || 0) -
                 (initialData.progress?.completed || 0),
         };
-
-        data.files = Object.freeze({
-            server_files: [],
-            client_files: [],
-            remote_files: [],
-        });
 
         if (Array.isArray(initialData.labels)) {
             data.labels = initialData.labels
@@ -937,7 +974,9 @@ export class Task extends Session {
                     // following fields also returned when doing API request /jobs/<id>
                     // here we know them from task and append to constructor
                     task_id: data.id,
+                    task_name: data.name,
                     project_id: data.project_id,
+                    project_name: data.project_name,
                     labels: data.labels,
                     bug_tracker: data.bug_tracker,
                     mode: data.mode,
@@ -947,7 +986,7 @@ export class Task extends Session {
                     target_storage: initialData.target_storage,
                     source_storage: initialData.source_storage,
                     parent_job_id: job.parent_job_id,
-                    consensus_replicas: job.consensus_replicas,
+                    replicas_count: job.replicas_count,
                 });
                 data.jobs.push(jobInstance);
             }
@@ -980,6 +1019,9 @@ export class Task extends Session {
                         data.project_id = projectId;
                     },
                 },
+                projectName: {
+                    get: () => data.project_name,
+                },
                 guideId: {
                     get: () => data.guide_id,
                 },
@@ -999,7 +1041,7 @@ export class Task extends Session {
                     get: () => data.assignee,
                     set: (assignee) => {
                         if (assignee !== null && !(assignee instanceof User)) {
-                            throw new ArgumentError('Value must be a user instance');
+                            throw new ArgumentError('Value must be a user instance or null');
                         }
                         updateTrigger.update('assignee');
                         data.assignee = assignee;
@@ -1060,112 +1102,9 @@ export class Task extends Session {
                 },
                 labels: {
                     get: () => [...data.labels],
-                    set: (labels: Label[]) => {
-                        if (!Array.isArray(labels)) {
-                            throw new ArgumentError('Value must be an array of Labels');
-                        }
-
-                        if (!Array.isArray(labels) || labels.some((label) => !(label instanceof Label))) {
-                            throw new ArgumentError(
-                                'Each array value must be an instance of Label',
-                            );
-                        }
-
-                        const oldIDs = data.labels.map((_label) => _label.id);
-                        const newIDs = labels.map((_label) => _label.id);
-
-                        // find any deleted labels and mark them
-                        data.labels.filter((_label) => !newIDs.includes(_label.id))
-                            .forEach((_label) => {
-                                // for deleted labels let's specify that they are deleted
-                                _label.deleted = true;
-                            });
-
-                        // find any patched labels and mark them
-                        labels.forEach((_label) => {
-                            const { id } = _label;
-                            if (oldIDs.includes(id)) {
-                                const oldLabelIndex = data.labels.findIndex((__label) => __label.id === id);
-                                if (oldLabelIndex !== -1) {
-                                    // replace current label by the patched one
-                                    const oldLabel = data.labels[oldLabelIndex];
-                                    data.labels.splice(oldLabelIndex, 1, _label);
-                                    if (!_.isEqual(_label.toJSON(), oldLabel.toJSON())) {
-                                        _label.patched = true;
-                                    }
-                                }
-                            }
-                        });
-
-                        // find new labels to append them to the end
-                        const newLabels = labels.filter((_label) => !Number.isInteger(_label.id));
-                        data.labels = [...data.labels, ...newLabels];
-
-                        updateTrigger.update('labels');
-                    },
                 },
                 jobs: {
                     get: () => [...(data.jobs || [])],
-                },
-                serverFiles: {
-                    get: () => [...data.files.server_files],
-                    set: (serverFiles) => {
-                        if (!Array.isArray(serverFiles)) {
-                            throw new ArgumentError(
-                                `Value must be an array. But ${typeof serverFiles} has been got.`,
-                            );
-                        }
-
-                        for (const value of serverFiles) {
-                            if (typeof value !== 'string') {
-                                throw new ArgumentError(
-                                    `Array values must be a string. But ${typeof value} has been got.`,
-                                );
-                            }
-                        }
-
-                        Array.prototype.push.apply(data.files.server_files, serverFiles);
-                    },
-                },
-                clientFiles: {
-                    get: () => [...data.files.client_files],
-                    set: (clientFiles) => {
-                        if (!Array.isArray(clientFiles)) {
-                            throw new ArgumentError(
-                                `Value must be an array. But ${typeof clientFiles} has been got.`,
-                            );
-                        }
-
-                        for (const value of clientFiles) {
-                            if (!(value instanceof File)) {
-                                throw new ArgumentError(
-                                    'Array values must be a File.',
-                                );
-                            }
-                        }
-
-                        Array.prototype.push.apply(data.files.client_files, clientFiles);
-                    },
-                },
-                remoteFiles: {
-                    get: () => [...data.files.remote_files],
-                    set: (remoteFiles) => {
-                        if (!Array.isArray(remoteFiles)) {
-                            throw new ArgumentError(
-                                `Value must be an array. But ${typeof remoteFiles} has been got.`,
-                            );
-                        }
-
-                        for (const value of remoteFiles) {
-                            if (typeof value !== 'string') {
-                                throw new ArgumentError(
-                                    `Array values must be a string. But ${typeof value} has been got.`,
-                                );
-                            }
-                        }
-
-                        Array.prototype.push.apply(data.files.remote_files, remoteFiles);
-                    },
                 },
                 frameFilter: {
                     get: () => data.frame_filter,
@@ -1249,7 +1188,13 @@ export class Task extends Session {
     }
 
     async save(
-        fields: Record<string, any> = {},
+        fields?: {
+            [index: string]: any;
+            clientFiles?: File[];
+            serverFiles?: string[];
+            remoteFiles?: string[];
+            labels?: Label[];
+        },
         options?: { updateStatusCallback?: (updateData: Request | UpdateStatusData) => void },
     ): Promise<Task> {
         const result = await PluginRegistry.apiWrapper.call(this, Task.prototype.save, fields, options);

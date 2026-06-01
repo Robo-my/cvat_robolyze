@@ -35,11 +35,12 @@ from rest_framework.response import Response
 
 import cvat.apps.dataset_manager as dm
 from cvat.apps.dataset_manager.task import PatchAction
-from cvat.apps.engine.frame_provider import TaskFrameProvider
 from cvat.apps.engine.log import ServerLogManager
+from cvat.apps.engine.media_io.frame_provider import TaskFrameProvider
 from cvat.apps.engine.models import (
     Job,
     Label,
+    MediaType,
     RequestAction,
     RequestTarget,
     ShapeType,
@@ -476,6 +477,9 @@ class LambdaFunction:
                     "obj_bbox": data.get("obj_bbox", None),
                 }
             )
+            text_prompts = data.get("text_prompts", None)
+            if text_prompts:
+                payload["text_prompts"] = text_prompts
         elif self.kind == FunctionKind.REID:
             payload.update(
                 {
@@ -1243,7 +1247,7 @@ def return_response(success_code=status.HTTP_200_OK):
 class FunctionViewSet(viewsets.ViewSet):
     lookup_value_regex = "[a-zA-Z0-9_.-]+"
     lookup_field = "func_id"
-    iam_organization_field = None
+    iam_supports_organization_params = False
     iam_permission_class = LambdaPermission
     serializer_class = None
 
@@ -1259,17 +1263,15 @@ class FunctionViewSet(viewsets.ViewSet):
         return gateway.get(func_id).to_dict()
 
     @extend_schema(
-        description=textwrap.dedent(
-            """\
-        Allows to execute a function for immediate computation.
+        description=textwrap.dedent("""\
+            Allows to execute a function for immediate computation.
 
-        Intended for short-lived executions, useful for interactive calls.
+            Intended for short-lived executions, useful for interactive calls.
 
-        When executed for interactive annotation, the job id must be specified
-        in the 'job' input field. The task id is not required in this case,
-        but if it is specified, it must match the job task id.
-        """
-        ),
+            When executed for interactive annotation, the job id must be specified
+            in the 'job' input field. The task id is not required in this case,
+            but if it is specified, it must match the job task id.
+        """),
         request=inline_serializer(
             "OnlineFunctionCall",
             fields={
@@ -1298,6 +1300,9 @@ class FunctionViewSet(viewsets.ViewSet):
                 + "with wrong arguments ({})".format(str(err)),
                 code=status.HTTP_400_BAD_REQUEST,
             )
+
+        if db_task.media_type == MediaType.AUDIO:
+            raise serializers.ValidationError("Auto-annotation is not available in audio tasks")
 
         gateway = LambdaGateway()
         lambda_func = gateway.get(func_id)
@@ -1371,7 +1376,7 @@ class FunctionViewSet(viewsets.ViewSet):
     ),
 )
 class RequestViewSet(viewsets.ViewSet):
-    iam_organization_field = None
+    iam_supports_organization_params = False
     iam_permission_class = LambdaPermission
     serializer_class = None
 
@@ -1416,6 +1421,9 @@ class RequestViewSet(viewsets.ViewSet):
                 + "with wrong arguments ({})".format(str(err)),
                 code=status.HTTP_400_BAD_REQUEST,
             )
+
+        if Task.objects.get(pk=task).media_type == MediaType.AUDIO:
+            raise serializers.ValidationError("Auto-annotation is not available in audio tasks")
 
         gateway = LambdaGateway()
         queue = LambdaQueue()

@@ -25,16 +25,20 @@ COMMANDS = CommandGroup(description="Perform operations on CVAT lambda functions
 
 @COMMANDS.command_class("create-native")
 class FunctionCreateNative:
-    description = textwrap.dedent(
-        """\
+    description = textwrap.dedent("""\
         Create a CVAT function that can be powered by an agent running the given local function.
-        """
-    )
+        """)
 
     def configure_parser(self, parser: argparse.ArgumentParser) -> None:
         parser.add_argument(
             "name",
             help="a human-readable name for the function",
+        )
+        parser.add_argument(
+            "--visibility",
+            choices=("private", "public"),
+            default="private",
+            help="visibility setting for the function",
         )
 
         configure_function_implementation_arguments(parser)
@@ -67,6 +71,7 @@ class FunctionCreateNative:
         client: Client,
         *,
         name: str,
+        visibility: str,
         function_loader: FunctionLoader,
     ) -> None:
         function = function_loader.load()
@@ -74,6 +79,7 @@ class FunctionCreateNative:
         remote_function: dict[str, Any] = {
             "provider": FUNCTION_PROVIDER_NATIVE,
             "name": name,
+            "visibility": visibility,
         }
 
         spec = function.spec

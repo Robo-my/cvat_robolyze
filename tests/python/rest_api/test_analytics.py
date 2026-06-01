@@ -61,7 +61,7 @@ class TestGetAuditEvents:
     @staticmethod
     def _create_project(user, spec, **kwargs):
         with make_api_client(user) as api_client:
-            (project, response) = api_client.projects_api.create(spec, **kwargs)
+            project, response = api_client.projects_api.create(spec, **kwargs)
             assert response.status == HTTPStatus.CREATED
         return project.id, response.headers.get("X-Request-Id")
 
@@ -254,6 +254,18 @@ class TestGetAuditEvents:
             request_id = payload["request"]["id"]
             assert request_id
             uuid.UUID(request_id)
+
+    @pytest.mark.parametrize("api_version", [1, 2])
+    def test_exported_events_do_not_contain_remote_addr(self, api_version: int):
+        query_params = {
+            "project_id": self.project_id,
+        }
+        data = self._test_get_audit_logs_as_csv(api_version=api_version, **query_params)
+        events = self._csv_to_dict(data)
+
+        assert len(events)
+        for event in events:
+            assert "remote_addr" not in event
 
     @pytest.mark.parametrize("api_version", [1, 2])
     def test_delete_project(self, api_version: int):

@@ -114,7 +114,7 @@ class TestGetOrganizations:
             assert response.status_code == HTTPStatus.OK
             assert DeepDiff(organizations[self._ORG], response.json()) == {}
         else:
-            assert response.status_code == HTTPStatus.NOT_FOUND
+            assert response.status_code == HTTPStatus.FORBIDDEN
 
     def test_can_remove_owner_and_fetch_with_sdk(self, admin_user, organizations):
         # test for API schema regressions
@@ -127,7 +127,7 @@ class TestGetOrganizations:
         with make_api_client(admin_user) as api_client:
             api_client.users_api.destroy(source_org["owner"]["id"])
 
-            (_, response) = api_client.organizations_api.retrieve(source_org["id"])
+            _, response = api_client.organizations_api.retrieve(source_org["id"])
             fetched_org = json.loads(response.data)
 
         source_org["owner"] = None

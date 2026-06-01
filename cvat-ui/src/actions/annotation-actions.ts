@@ -38,6 +38,7 @@ interface AnnotationsParameters {
     jobInstance: Job;
     groundTruthInstance: Job | null;
     validationLayout: JobValidationLayout | null;
+    workspace: Workspace;
 }
 
 const cvat = getCore();
@@ -59,6 +60,7 @@ export function receiveAnnotationsParameters(): AnnotationsParameters {
                 frame: { number: frame },
             },
             job: { instance: jobInstance, groundTruthInfo: { groundTruthInstance, validationLayout } },
+            workspace,
         },
         settings: {
             workspace: { showAllInterpolationTracks },
@@ -74,19 +76,8 @@ export function receiveAnnotationsParameters(): AnnotationsParameters {
         validationLayout,
         showAllInterpolationTracks,
         showGroundTruth,
+        workspace,
     };
-}
-
-export function computeZRange(states: any[]): number[] {
-    const filteredStates = states.filter((state: any): any => state.objectType !== ObjectType.TAG);
-    let minZ = filteredStates.length ? filteredStates[0].zOrder : 0;
-    let maxZ = filteredStates.length ? filteredStates[0].zOrder : 0;
-    filteredStates.forEach((state: any): void => {
-        minZ = Math.min(minZ, state.zOrder);
-        maxZ = Math.max(maxZ, state.zOrder);
-    });
-
-    return [minZ, maxZ];
 }
 
 export enum AnnotationActionTypes {
@@ -134,6 +125,7 @@ export enum AnnotationActionTypes {
     PROPAGATE_OBJECT_SUCCESS = 'PROPAGATE_OBJECT_SUCCESS',
     PROPAGATE_OBJECT_FAILED = 'PROPAGATE_OBJECT_FAILED',
     SWITCH_PROPAGATE_VISIBILITY = 'SWITCH_PROPAGATE_VISIBILITY',
+    SWITCH_SIMPLIFY_VISIBILITY = 'SWITCH_SIMPLIFY_VISIBILITY',
     SWITCH_SHOWING_STATISTICS = 'SWITCH_SHOWING_STATISTICS',
     SWITCH_SHOWING_FILTERS = 'SWITCH_SHOWING_FILTERS',
     COLLECT_STATISTICS = 'COLLECT_STATISTICS',
@@ -153,7 +145,6 @@ export enum AnnotationActionTypes {
     FETCH_ANNOTATIONS_FAILED = 'FETCH_ANNOTATIONS_FAILED',
     ROTATE_FRAME = 'ROTATE_FRAME',
     SWITCH_Z_LAYER = 'SWITCH_Z_LAYER',
-    ADD_Z_LAYER = 'ADD_Z_LAYER',
     SEARCH_ANNOTATIONS_FAILED = 'SEARCH_ANNOTATIONS_FAILED',
     SEARCH_CHAPTERS_FAILED = 'SEARCH_CHAPTERS_FAILED',
     CHANGE_WORKSPACE = 'CHANGE_WORKSPACE',
@@ -174,6 +165,11 @@ export enum AnnotationActionTypes {
     UPDATE_BRUSH_TOOLS_CONFIG = 'UPDATE_BRUSH_TOOLS_CONFIG',
     HIGHLIGHT_CONFLICT = 'HIGHLIGHT_CONFCLICT',
     HOVERED_CHAPTER = 'HOVERED_CHAPTER',
+}
+
+export enum AnnotationSource {
+    DRAW_SIMPLIFIED_POLY = 'draw_simplified_poly',
+    OTHER = 'other',
 }
 
 export function setHoveredChapter(id: number | null): AnyAction {
@@ -231,13 +227,6 @@ export function canvasErrorOccurred(error: Error): AnyAction {
     };
 }
 
-export function addZLayer(): AnyAction {
-    return {
-        type: AnnotationActionTypes.ADD_Z_LAYER,
-        payload: {},
-    };
-}
-
 export function switchZLayer(cur: number): AnyAction {
     return {
         type: AnnotationActionTypes.SWITCH_Z_LAYER,
@@ -270,20 +259,53 @@ function wrapAnnotationsInGTJob(states: ObjectState[]): ObjectState[] {
     }));
 }
 
+const userUnlockedInReviewMode = new Set<number>();
+
+function wrapStatesForReviewMode(states: ObjectState[]): ObjectState[] {
+    return states.map((state: ObjectState) => new Proxy(state, {
+        get(target, prop) {
+            if (prop === 'lock') {
+                if (target.isGroundTruth) {
+                    return true;
+                }
+
+                // If user explicitly unlocked this object, return actual lock state
+                if (userUnlockedInReviewMode.has(target.clientID as number)) {
+                    return Reflect.get(target, prop);
+                }
+                return true;
+            }
+            return Reflect.get(target, prop);
+        },
+        set(target, prop, value) {
+            if (prop === 'lock') {
+                if (target.isGroundTruth) {
+                    return Reflect.set(target, prop, true);
+                }
+
+                if (!value) {
+                    userUnlockedInReviewMode.add(target.clientID as number);
+                } else {
+                    userUnlockedInReviewMode.delete(target.clientID as number);
+                }
+            }
+            return Reflect.set(target, prop, value);
+        },
+    }));
+}
+
 async function fetchAnnotations(predefinedFrame?: number): Promise<{
     states: CombinedState['annotation']['annotations']['states'];
     history: CombinedState['annotation']['annotations']['history'];
-    minZ: number;
-    maxZ: number;
 }> {
     const {
         filters, frame, showAllInterpolationTracks, jobInstance,
         showGroundTruth, groundTruthInstance, validationLayout,
+        workspace,
     } = receiveAnnotationsParameters();
 
     const fetchFrame = typeof predefinedFrame === 'undefined' ? frame : predefinedFrame;
     let states = await jobInstance.annotations.get(fetchFrame, showAllInterpolationTracks, filters);
-    const [minZ, maxZ] = computeZRange(states);
 
     if (jobInstance.type === JobType.GROUND_TRUTH) {
         states = wrapAnnotationsInGTJob(states);
@@ -300,30 +322,32 @@ async function fetchAnnotations(predefinedFrame?: number): Promise<{
         }
     }
 
+    if (workspace === Workspace.REVIEW) {
+        states = wrapStatesForReviewMode(states);
+    }
+
     const history = await jobInstance.actions.get();
 
     return {
         states,
         history,
-        minZ,
-        maxZ,
     };
 }
 
 export function fetchAnnotationsAsync(): ThunkAction {
-    return async (dispatch: ThunkDispatch): Promise<void> => {
+    return async (dispatch: ThunkDispatch, getState: () => CombinedState): Promise<void> => {
         try {
-            const {
-                states, history, minZ, maxZ,
-            } = await fetchAnnotations();
+            const { states, history } = await fetchAnnotations();
 
-            dispatch({
+            const { workspace } = getState().annotation;
+            const finalStates = workspace === Workspace.REVIEW ?
+                wrapStatesForReviewMode(states) : states;
+
+            await dispatch({
                 type: AnnotationActionTypes.FETCH_ANNOTATIONS_SUCCESS,
                 payload: {
-                    states,
+                    states: finalStates,
                     history,
-                    minZ,
-                    maxZ,
                 },
             });
         } catch (error) {
@@ -458,6 +482,18 @@ export function switchPropagateVisibility(visible: boolean): AnyAction {
     };
 }
 
+export function switchSimplifyVisibility(clientID: number | null): AnyAction {
+    const state = getStore().getState();
+    const objectState = clientID !== null ?
+        state.annotation.annotations.states.find((s: ObjectState) => s.clientID === clientID) || null :
+        null;
+    const originalPoints = objectState?.points ? [...objectState.points] : null;
+    return {
+        type: AnnotationActionTypes.SWITCH_SIMPLIFY_VISIBILITY,
+        payload: { objectState, originalPoints },
+    };
+}
+
 export function propagateObjectAsync(from: number, to: number): ThunkAction {
     return async (dispatch: ThunkDispatch, getState): Promise<void> => {
         const state = getState();
@@ -559,14 +595,23 @@ export function activateObject(
     activatedStateID: number | null,
     activatedElementID: number | null,
     activatedAttributeID: number | null,
-): AnyAction {
-    return {
-        type: AnnotationActionTypes.ACTIVATE_OBJECT,
-        payload: {
-            activatedStateID,
-            activatedElementID,
-            activatedAttributeID,
-        },
+): ThunkAction<void> {
+    return (dispatch: ThunkDispatch, getState: () => CombinedState): void => {
+        const state = getState();
+        const lockedClientID = state.annotation.simplify.objectState?.clientID ?? null;
+
+        if (lockedClientID !== null && activatedStateID !== lockedClientID) {
+            return;
+        }
+
+        dispatch({
+            type: AnnotationActionTypes.ACTIVATE_OBJECT,
+            payload: {
+                activatedStateID,
+                activatedElementID,
+                activatedAttributeID,
+            },
+        });
     };
 }
 
@@ -648,7 +693,7 @@ export function updateCachedChunksAsync(): ThunkAction {
             }, []).map(([start, end]) => `${start}:${end}`).join(';');
 
             dispatch(updateCachedChunks(ranges));
-        } catch (error) {
+        } catch (_error) {
             // even if error happens here, do not need to notify the users
         }
     };
@@ -736,9 +781,12 @@ export function changeFrameAsync(
                 Math.round(1000 / frameSpeed) - currentTime + (state.annotation.player.frame.changeTime as number),
             );
 
-            const {
-                states, maxZ, minZ, history,
-            } = await fetchAnnotations(toFrame);
+            const { states, history } = await fetchAnnotations(toFrame);
+
+            if (state.annotation.workspace === Workspace.REVIEW) {
+                userUnlockedInReviewMode.clear();
+            }
+
             dispatch({
                 type: AnnotationActionTypes.CHANGE_FRAME_SUCCESS,
                 payload: {
@@ -748,9 +796,6 @@ export function changeFrameAsync(
                     relatedFiles: data.relatedFiles,
                     states,
                     history,
-                    minZ,
-                    maxZ,
-                    curZ: maxZ,
                     changeTime: currentTime + delay,
                     delay,
                     changeFrameEvent,
@@ -955,7 +1000,7 @@ export function getJobAsync({
             if (job.type === JobType.ANNOTATION || job.type === JobType.CONSENSUS_REPLICA) {
                 try {
                     [gtJob] = await cvat.jobs.get({ taskID, type: JobType.GROUND_TRUTH });
-                } catch (e) {
+                } catch (_e) {
                     // gtJob is not available for workers
                     // do nothing
                 }
@@ -975,7 +1020,7 @@ export function getJobAsync({
                 // call first getting of frame data before rendering interface
                 // to load and decode first chunk
                 await frameData.data();
-            } catch (error) {
+            } catch (_error) {
                 // do nothing, user will be notified when data request is done
             }
 
@@ -1109,6 +1154,7 @@ export function rememberObject(createParams: {
     activeNumOfPoints?: number;
     activeRectDrawingMethod?: RectDrawingMethod;
     activeCuboidDrawingMethod?: CuboidDrawingMethod;
+    activeSimplifyPoly?: boolean;
 }, updateCurrentControl = true): AnyAction {
     return {
         type: AnnotationActionTypes.REMEMBER_OBJECT,
@@ -1125,42 +1171,74 @@ export function updateActiveControl(activeControl: ActiveControl): AnyAction {
     };
 }
 
-export function updateAnnotationsAsync(statesToUpdate: any[]): ThunkAction {
-    return async (dispatch: ThunkDispatch): Promise<void> => {
-        const { jobInstance } = receiveAnnotationsParameters();
+function dispatchAnnotationsUpdate(dispatch: ThunkDispatch, states: any[], history: any): void {
+    dispatch({
+        type: AnnotationActionTypes.UPDATE_ANNOTATIONS_SUCCESS,
+        payload: {
+            states,
+            history,
+        },
+    });
+}
 
+async function updateObjectsLayers(
+    dispatch: ThunkDispatch,
+    update: (jobInstance: Job) => Promise<ObjectState[]>,
+): Promise<void> {
+    const { jobInstance, workspace } = receiveAnnotationsParameters();
+    try {
+        let updatedStates = await update(jobInstance);
+        if (!updatedStates.length) {
+            return;
+        }
+
+        if (jobInstance.type === JobType.GROUND_TRUTH) {
+            updatedStates = wrapAnnotationsInGTJob(updatedStates);
+        }
+
+        if (workspace === Workspace.REVIEW) {
+            updatedStates = wrapStatesForReviewMode(updatedStates);
+        }
+
+        dispatch(activateObject(null, null, null));
+        dispatchAnnotationsUpdate(dispatch, updatedStates, await jobInstance.actions.get());
+    } catch (error) {
+        dispatch({
+            type: AnnotationActionTypes.UPDATE_ANNOTATIONS_FAILED,
+            payload: { error },
+        });
+        dispatch(fetchAnnotationsAsync());
+    }
+}
+
+export function updateAnnotationsAsync(statesToUpdate: ObjectState[]): ThunkAction {
+    return async (dispatch: ThunkDispatch): Promise<void> => {
+        const { jobInstance, workspace } = receiveAnnotationsParameters();
         try {
-            if (statesToUpdate.some((state: any): boolean => state.updateFlags.zOrder)) {
+            if (statesToUpdate.some((state): boolean => state.updateFlags.zOrder)) {
                 // deactivate object to visualize changes immediately (UX)
                 dispatch(activateObject(null, null, null));
             }
 
-            const promises = statesToUpdate.map((objectState: any): Promise<any> => objectState.save());
+            const promises = statesToUpdate.map((objectState) => objectState.save());
             let states = await Promise.all(promises);
 
             if (jobInstance.type === JobType.GROUND_TRUTH) {
                 states = wrapAnnotationsInGTJob(states);
             }
 
+            if (workspace === Workspace.REVIEW) {
+                states = wrapStatesForReviewMode(states);
+            }
+
             const needToUpdateAll = states
-                .some((state: any) => state.shapeType === ShapeType.MASK || state.parentID !== null);
+                .some((state) => state.shapeType === ShapeType.MASK || state.parentID !== null);
             if (needToUpdateAll) {
                 dispatch(fetchAnnotationsAsync());
                 return;
             }
 
-            const history = await jobInstance.actions.get();
-            const [minZ, maxZ] = computeZRange(states);
-
-            dispatch({
-                type: AnnotationActionTypes.UPDATE_ANNOTATIONS_SUCCESS,
-                payload: {
-                    states,
-                    history,
-                    minZ,
-                    maxZ,
-                },
-            });
+            dispatchAnnotationsUpdate(dispatch, states, await jobInstance.actions.get());
         } catch (error) {
             dispatch({
                 type: AnnotationActionTypes.UPDATE_ANNOTATIONS_FAILED,
@@ -1171,12 +1249,60 @@ export function updateAnnotationsAsync(statesToUpdate: any[]): ThunkAction {
     };
 }
 
-export function createAnnotationsAsync(statesToCreate: any[]): ThunkAction {
+export function updateLayerAsync(
+    frame: number,
+    placement: { exact: number } | { before: number } | { after: number },
+    statesToMove: ObjectState[],
+): ThunkAction {
+    return async (dispatch: ThunkDispatch): Promise<void> => {
+        await updateObjectsLayers(
+            dispatch,
+            (jobInstance) => jobInstance.annotations.updateLayer(frame, placement, statesToMove),
+        );
+    };
+}
+
+export function compactLayersAsync(frame: number): ThunkAction {
+    return async (dispatch: ThunkDispatch): Promise<void> => {
+        await updateObjectsLayers(
+            dispatch,
+            (jobInstance) => jobInstance.annotations.compactLayers(frame),
+        );
+    };
+}
+
+export function changeWorkspaceAsync(workspace: Workspace): ThunkAction {
+    return async (dispatch: ThunkDispatch, getState): Promise<void> => {
+        const state = getState();
+        const { workspace: currentWorkspace } = state.annotation;
+
+        if (currentWorkspace === Workspace.REVIEW && workspace !== Workspace.REVIEW) {
+            userUnlockedInReviewMode.clear();
+        }
+
+        dispatch(changeWorkspace(workspace));
+
+        // Re-fetch annotations to apply or remove the Proxy wrapper
+        if (currentWorkspace === Workspace.REVIEW || workspace === Workspace.REVIEW) {
+            dispatch(fetchAnnotationsAsync());
+        }
+    };
+}
+
+export function createAnnotationsAsync(
+    statesToCreate: ObjectState[],
+    source: AnnotationSource = AnnotationSource.OTHER,
+): ThunkAction {
     return async (dispatch: ThunkDispatch): Promise<void> => {
         try {
             const { jobInstance } = receiveAnnotationsParameters();
-            await jobInstance.annotations.put(statesToCreate);
-            dispatch(fetchAnnotationsAsync());
+            const clientIds = await jobInstance.annotations.put(statesToCreate);
+            await dispatch(fetchAnnotationsAsync());
+
+            if (source === AnnotationSource.DRAW_SIMPLIFIED_POLY && statesToCreate.length === 1) {
+                const [clientId] = clientIds;
+                dispatch(switchSimplifyVisibility(clientId));
+            }
         } catch (error) {
             dispatch({
                 type: AnnotationActionTypes.CREATE_ANNOTATIONS_FAILED,
@@ -1239,7 +1365,7 @@ export function groupAnnotationsAsync(statesToGroup: any[]): ThunkAction {
 
 export function joinAnnotationsAsync(
     statesToJoin: CombinedState['annotation']['annotations']['states'],
-    points: number[],
+    points: number[][],
 ): ThunkAction {
     return async (dispatch: ThunkDispatch): Promise<void> => {
         try {
@@ -1443,7 +1569,7 @@ export function pasteShapeAsync(): ThunkAction {
 export function interactWithCanvas(
     activeInteractor: MLModel | OpenCVTool,
     activeLabelID: number,
-    activeInteractorParameters: MLModel['params']['canvas'],
+    activeInteractorParameters: CombinedState['annotation']['drawing']['activeInteractorParameters'],
 ): AnyAction {
     return {
         type: AnnotationActionTypes.INTERACT_WITH_CANVAS,
@@ -1473,24 +1599,18 @@ export function repeatDrawShapeAsync(): ThunkAction {
                 activeNumOfPoints,
                 activeRectDrawingMethod,
                 activeCuboidDrawingMethod,
+                activeSimplifyPoly,
             },
         } = getStore().getState().annotation;
 
         let activeControl = ActiveControl.CURSOR;
         if (activeInteractor && activeInteractorParameters && activeLabelID && canvasInstance instanceof Canvas) {
             if (activeInteractor.kind.includes('tracker')) {
-                canvasInstance.interact({
-                    enabled: true,
-                    shapeType: 'rectangle',
-                });
-                dispatch(interactWithCanvas(activeInteractor, activeLabelID, {}));
+                canvasInstance.interact({ enabled: true, ...activeInteractorParameters });
+                dispatch(interactWithCanvas(activeInteractor, activeLabelID, activeInteractorParameters));
                 dispatch(switchToolsBlockerState({ buttonVisible: false }));
             } else {
-                canvasInstance.interact({
-                    enabled: true,
-                    shapeType: 'points',
-                    ...activeInteractorParameters,
-                });
+                canvasInstance.interact({ enabled: true, ...activeInteractorParameters });
                 dispatch(interactWithCanvas(activeInteractor, activeLabelID, activeInteractorParameters));
             }
 
@@ -1528,6 +1648,7 @@ export function repeatDrawShapeAsync(): ThunkAction {
                 dispatch(createAnnotationsAsync([objectState]));
             }
         } else if (canvasInstance) {
+            const effectiveSimplifyPoly = typeof activeNumOfPoints !== 'undefined' ? false : activeSimplifyPoly;
             canvasInstance.draw({
                 enabled: true,
                 rectDrawingMethod: activeRectDrawingMethod,
@@ -1535,7 +1656,8 @@ export function repeatDrawShapeAsync(): ThunkAction {
                 numberOfPoints: activeNumOfPoints,
                 shapeType: activeShapeType,
                 crosshair: [ShapeType.RECTANGLE, ShapeType.CUBOID, ShapeType.ELLIPSE].includes(activeShapeType),
-                skeletonSVG: activeShapeType === ShapeType.SKELETON ? activeLabel.structure.svg : undefined,
+                skeletonSVG: activeShapeType === ShapeType.SKELETON ? activeLabel.structure!.svg : undefined,
+                simplifyPoly: effectiveSimplifyPoly,
             });
         }
     };
