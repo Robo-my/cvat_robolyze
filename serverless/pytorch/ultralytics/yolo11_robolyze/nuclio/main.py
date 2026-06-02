@@ -30,7 +30,9 @@ def handler(context, event):
     image = Image.open(buf).convert("RGB")
 
     results = context.user_data.model.predict(
-        source=image, conf=threshold, verbose=False,
+        source=image,
+        conf=threshold,
+        verbose=False,
     )[0]
 
     labels = context.user_data.labels
@@ -39,12 +41,14 @@ def handler(context, event):
         cls_id = int(box.cls.item())
         conf = float(box.conf.item())
         x1, y1, x2, y2 = box.xyxy[0].tolist()
-        detections.append({
-            "confidence": str(conf),
-            "label": labels.get(cls_id, str(cls_id)),
-            "points": [x1, y1, x2, y2],
-            "type": "rectangle",
-        })
+        detections.append(
+            {
+                "confidence": str(conf),
+                "label": labels.get(cls_id, str(cls_id)),
+                "points": [x1, y1, x2, y2],
+                "type": "rectangle",
+            }
+        )
 
     return context.Response(
         body=json.dumps(detections),

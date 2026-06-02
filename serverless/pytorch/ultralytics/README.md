@@ -24,7 +24,7 @@ serverless/pytorch/ultralytics/add_yolo_model.sh \
 - First deploy of any model builds a docker image and pulls PyTorch (~10–15 min);
   later models reuse the cache (~30 s).
 - After it reports `ready`, refresh the CVAT **Models** tab, then in a task:
-  *Actions → Automatic annotation*.
+  _Actions → Automatic annotation_.
 
 ## Layout
 
