@@ -153,10 +153,32 @@ nuctl deploy --project-name cvat --path "$FUNC_DIR" \
     --env CVAT_FUNCTIONS_REDIS_PORT=6666 \
     --platform-config '{"attributes": {"network": "cvat_cvat"}}'
 
+# ---- post-deploy: normalize nuclio store files ----
+# Nuclio's local store lists functions via `cat <dir>/*` split BY NEWLINE, decoding
+# each line as one resource. So every *.json MUST end with exactly one '\n' (the row
+# separator). A file missing it is harmless while it's the only function, but the next
+# deploy merges two files into one corrupt line -> the WHOLE Models list breaks in CVAT
+# ("Could not get models from the server"). Self-heal every file, new and pre-existing.
+info "Normalizing nuclio store files (ensuring trailing newline / row separator)"
+docker exec nuclio-local-storage-reader sh -c '
+  for f in /etc/nuclio/store/functions/nuclio/*.json; do
+    [ -f "$f" ] || continue
+    [ "$(tail -c1 "$f" | od -An -tx1 | tr -d " ")" = "0a" ] || printf "\n" >> "$f"
+  done' || info "WARNING: store normalization step failed (continuing to health check)"
+
 # ---- post-deploy health check ----
 info "Verifying function state"
 STATE_LINE="$(nuctl get function "$FUNC_NAME" --platform local 2>/dev/null | grep "$FUNC_NAME" || true)"
 echo "$STATE_LINE"
+# Verify the LIST read too (this is what CVAT's Models tab actually does: cat all
+# function files + decode each). A single-function check can pass while the list is
+# broken, so this guards the exact operation CVAT relies on.
+if ! nuctl get functions --platform local >/dev/null 2>&1; then
+    die "deploy left the nuclio function LIST unreadable -- CVAT's Models tab would show
+'Could not get models from the server'. The store likely has a function file missing its
+trailing newline; re-run, or normalize: for each /etc/nuclio/store/functions/nuclio/*.json
+ensure it ends with a single '\n', then 'nuctl get functions --platform local'."
+fi
 if echo "$STATE_LINE" | grep -q "ready"; then
     info "SUCCESS: '$NAME' is ready. Refresh the CVAT Models tab to use it."
 else

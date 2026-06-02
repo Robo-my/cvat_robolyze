@@ -45,7 +45,7 @@ result.
 
 4. **Report the result**: on success, tell them to refresh the CVAT **Models**
    tab — the model appears as the display name. Then in a task:
-   *Actions → Automatic annotation → pick the model → map labels → Annotate*.
+   _Actions → Automatic annotation → pick the model → map labels → Annotate_.
    Remind them to eyeball the first run to confirm class labels are correct (the
    real test of class-order).
 
