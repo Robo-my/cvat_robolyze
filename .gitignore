@@ -77,3 +77,6 @@ cvat-ui/dist
 **/!.yarn/releases
 **/!.yarn/sdks
 **/!.yarn/versions
+
+# YOLO/serverless model weights (do not commit binaries)
+serverless/**/*.pt
