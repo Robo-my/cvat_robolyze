@@ -1,0 +1,42 @@
+metadata:
+  name: pth-ultralytics-{{SLUG}}
+  namespace: cvat
+  annotations:
+    name: {{NAME}}
+    type: detector
+    spec: |
+      {{SPEC_JSON}}
+
+spec:
+  description: {{NAME}} (YOLO detector deployed via add_yolo_model.sh)
+  runtime: 'python:3.10'
+  handler: main:handler
+  eventTimeout: 30s
+
+  build:
+    image: cvat.pth.ultralytics.{{SLUG}}
+    baseImage: ubuntu:22.04
+
+    directives:
+      preCopy:
+        - kind: RUN
+          value: apt-get update && apt-get install --no-install-recommends -y python3-pip python-is-python3 libgl1 libglib2.0-0 && rm -rf /var/lib/apt/lists/*
+        - kind: RUN
+          value: pip install --no-cache-dir ultralytics==8.3.40 pillow pyyaml
+        - kind: WORKDIR
+          value: /opt/nuclio
+
+  triggers:
+    myHttpTrigger:
+      numWorkers: 2
+      kind: 'http'
+      workerAvailabilityTimeoutMilliseconds: 10000
+      attributes:
+        maxRequestBodySize: 33554432 # 32MB
+
+  platform:
+    attributes:
+      restartPolicy:
+        name: always
+        maximumRetryCount: 3
+      mountMode: volume
