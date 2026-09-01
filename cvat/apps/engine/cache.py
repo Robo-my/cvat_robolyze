@@ -252,9 +252,16 @@ class MediaCache:
         # allow empty data to be set in cache to prevent
         # future rq jobs from being enqueued to prepare the item
         cache = cls._cache()
+        # This lock is held across a write into the on-disk (kvrocks) media cache.
+        # Under heavy disk I/O that write can exceed the 60s default lock timeout,
+        # which expires the lock and fails the whole export with LockNotOwnedError.
+        # The default is tied to the nginx request timeout, so it is raised here
+        # rather than globally in get_rq_lock_for_job.
         with get_rq_lock_for_job(
             cls._get_queue(),
             key,
+            timeout=600,
+            blocking_timeout=300,
         ):
             cached_item = cache.get(key)
             if cached_item is not None:
