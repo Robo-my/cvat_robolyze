@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import mimetypes
 import os
 import re
 import shutil
@@ -25,7 +26,7 @@ from urllib.parse import urlparse
 
 import django_rq
 from django.conf import settings
-from django.contrib.auth.models import Group, User
+from django.contrib.auth.models import Group
 from django.core.files.uploadedfile import UploadedFile
 from django.db import transaction
 from django.db.models import Count, Prefetch, prefetch_related_objects
@@ -42,14 +43,13 @@ from cvat.apps.engine import field_validation, models
 from cvat.apps.engine.cloud_provider import (
     Credentials,
     Status,
-    db_storage_to_storage_instance,
-    get_cloud_storage_instance,
+    get_cloud_storage_client,
 )
 from cvat.apps.engine.log import ServerLogManager
 from cvat.apps.engine.media_io.frame_provider import TaskFrameProvider
-from cvat.apps.engine.model_utils import bulk_create
 from cvat.apps.engine.permissions import ProjectPermission, TaskPermission
 from cvat.apps.engine.rq import RunningBackgroundProcessesError, update_org_related_data_in_rq_jobs
+from cvat.apps.engine.task import ensure_task_is_initialized
 from cvat.apps.engine.task_validation import HoneypotFrameSelector
 from cvat.apps.engine.types import ExtendedRequest
 from cvat.apps.engine.utils import (
@@ -63,9 +63,11 @@ from cvat.apps.engine.utils import (
     parse_specific_attributes,
     take_by,
 )
+from cvat.apps.iam.models import User
 from cvat.apps.iam.permissions import get_iam_context
 from cvat.apps.organizations.models import Organization
 from cvat.apps.webhooks.models import Webhook
+from cvat.utils import django_database as db_utils
 from cvat.utils.paths import problem_with_untrusted_path
 from utils.dataset_manifest import ImageManifestManager
 
@@ -151,14 +153,10 @@ class HyperlinkedEndpointSerializer(serializers.Serializer):
         return instance
 
     def to_representation(self, instance):
-        request = self.context.get("request")
-        if not request:
-            return None
-
         return serializers.Hyperlink(
             reverse(
                 self.view_name,
-                request=request,
+                request=self.context.get("request"),
                 query=build_field_filter_params(self.filter_key, getattr(instance, self.key_field)),
             ),
             instance,
@@ -222,12 +220,8 @@ class LabelsSummarySerializer(serializers.Serializer):
         return reverse("label-list", request=request, query={filter_key: instance.id})
 
     def to_representation(self, instance):
-        request = self.context.get("request")
-        if not request:
-            return None
-
         return {
-            "url": self.get_url(request, instance),
+            "url": self.get_url(self.context.get("request"), instance),
         }
 
 
@@ -1284,18 +1278,22 @@ class JobWriteSerializer(WriteOnceMixin, serializers.ModelSerializer):
             raise serializers.ValidationError(f"Unexpected job type '{validated_data['type']}'")
 
         task_id = validated_data.pop("task_id")
-        task = models.Task.objects.select_for_update().get(pk=task_id)
+        task = models.Task.objects.get(pk=task_id)
 
-        if not task.data:
+        if task.data_id is None:
             raise serializers.ValidationError(
                 "This task has no data attached yet. Please set up task data and try again"
             )
+
+        ensure_task_is_initialized(task=task)
 
         if task.data.validation_mode in (models.ValidationMode.GT_POOL, models.ValidationMode.GT):
             raise serializers.ValidationError(
                 f'Task with validation mode "{task.data.validation_mode}" '
                 "cannot have more than 1 GT job"
             )
+
+        task = models.Task.objects.select_for_update().get(pk=task_id)
 
         if task.media_type == models.MediaType.AUDIO:
             frames = []
@@ -1692,9 +1690,13 @@ class JobValidationLayoutWriteSerializer(serializers.Serializer):
 
             # Update chunks
             job_frame_provider = JobFrameProvider(db_job)
-            updated_segment_chunk_ids = set(
-                job_frame_provider.get_chunk_number(updated_segment_frame_id)
-                for updated_segment_frame_id in updated_honeypots
+            updated_segment_chunk_ids = range(
+                # We store chunk update dates only per segment,
+                # so we invalidate all the chunks in the segment.
+                # This allows the cache to check the chunk timestamps before returning them.
+                # Change the granularity to per chunk, if the performance is bad.
+                job_frame_provider.get_chunk_number(min(segment_frame_set)),
+                job_frame_provider.get_chunk_number(max(segment_frame_set)) + 1,
             )
             segment_frames = sorted(segment_frame_set)
             segment_frame_map = dict(zip(segment_honeypots, requested_frames))
@@ -1707,7 +1709,9 @@ class JobValidationLayoutWriteSerializer(serializers.Serializer):
                 ]
 
                 for quality in models.FrameQuality:
-                    if db_data.storage_method == models.StorageMethodChoice.FILE_SYSTEM:
+                    if db_data.storage_method == models.StorageMethodChoice.FILE_SYSTEM and not (
+                        updated_honeypots.keys().isdisjoint(chunk_frames)
+                    ):
                         rq_id = f"segment_{db_segment.id}_write_chunk_{chunk_id}_{quality}"
                         rq_job = enqueue_create_chunk_job(
                             queue=queue,
@@ -2119,7 +2123,7 @@ class TaskValidationLayoutWriteSerializer(serializers.Serializer):
         # The django generated bulk_update() query is too slow, so we use bulk_create() instead
         # NOTE: Silk doesn't show these queries in the list of queries
         # for some reason, but they can be seen in the profile
-        bulk_create(
+        db_utils.bulk_create(
             models.Image,
             list(bulk_context.updated_honeypots.values()),
             update_conflicts=True,
@@ -2176,7 +2180,7 @@ class TaskValidationLayoutWriteSerializer(serializers.Serializer):
                     for m2m_obj in validation_frame_m2m_objects
                 )
 
-        bulk_create(models.RelatedFile.images.through, new_m2m_objects)
+        db_utils.bulk_create(models.RelatedFile.images.through, new_m2m_objects)
 
         # Update manifest if present
         manifest_path = db_task.data.get_manifest_path()
@@ -2523,7 +2527,7 @@ class ValidationParamsSerializer(serializers.ModelSerializer):
         instance = super().create(validated_data)
 
         if frames:
-            bulk_create(
+            db_utils.bulk_create(
                 models.ValidationFrame,
                 [
                     models.ValidationFrame(validation_params=instance, path=frame)
@@ -2544,7 +2548,7 @@ class ValidationParamsSerializer(serializers.ModelSerializer):
         if frames:
             models.ValidationFrame.objects.filter(validation_params=instance).delete()
 
-            bulk_create(
+            db_utils.bulk_create(
                 models.ValidationFrame,
                 [
                     models.ValidationFrame(validation_params=instance, path=frame)
@@ -2850,7 +2854,7 @@ class DataSerializer(serializers.ModelSerializer):
             (models.ClientFile, models.ServerFile, models.RemoteFile),
         ):
             if files_type in files:
-                bulk_create(
+                db_utils.bulk_create(
                     files_model, [files_model(data=instance, **f) for f in files[files_type]]
                 )
 
@@ -3723,8 +3727,7 @@ class DataMetaWriteSerializer(serializers.ModelSerializer):
     def validate_cloud_storage_id(self, cloud_storage_id: int):
         try:
             db_storage: models.CloudStorage = models.CloudStorage.objects.get(id=cloud_storage_id)
-            storage = db_storage_to_storage_instance(db_storage)
-            storage_status = storage.get_status()
+            storage_status = db_storage.get_client().get_status()
             if storage_status != Status.AVAILABLE:
                 raise serializers.ValidationError(
                     f"The specified cloud storage '{db_storage.display_name}' is not available."
@@ -3887,7 +3890,11 @@ class AnnotationSerializer(serializers.Serializer):
         default=0,
         allow_null=True,  # backward compatibility; TODO: disallow on the DB level
     )
-    source = serializers.CharField(default=models.SourceType.MANUAL)
+    source = serializers.CharField(
+        # TODO: change the field type to ChoiceField,
+        # when SDK can compare string enum values without explicit .value access
+        default=models.SourceType.MANUAL
+    )
 
     def _validate_id_absent(self, value):
         if value is not None:
@@ -3925,6 +3932,33 @@ class AnnotationSerializer(serializers.Serializer):
                 assert False, f"Unknown action {action!r}"
 
         return None
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+
+        source = attrs.get("source")
+        try:
+            models.SourceType(source)
+        except ValueError:
+            if attrs.get("id"):
+                # Workaround for the DB records that could have been introduced by the UI before
+                # https://github.com/cvat-ai/cvat/issues/8874 was fixed.
+                # We allow the DB to store the old invalid annotations and return them from
+                # the server API, but disallow saving new ones. If the annotations were used
+                # for updating the existing annotations, we silently fix the input annotations.
+                # This is done this way to avoid heavy DB migrations.
+                source = str(models.SourceType.MANUAL)
+            else:
+                raise serializers.ValidationError(
+                    {
+                        "source": "must be one of {}, got '{}'".format(
+                            format_list([f"'{v[0]}'" for v in models.SourceType.choices()]), source
+                        )
+                    }
+                )
+        attrs["source"] = source
+
+        return attrs
 
 
 class LabeledImageSerializer(
@@ -3966,6 +4000,8 @@ class ShapeSerializer(serializers.Serializer):
     points = OptimizedFloatListField(allow_empty=True, required=False)
 
     def validate(self, attrs):
+        attrs = super().validate(attrs)
+
         shape_type = attrs["type"]
 
         num_points = len(attrs.get("points", ()))
@@ -4156,8 +4192,15 @@ class LabeledIntervalSerializer(
     AttributedAnnotationSerializer,
     ScoredAnnotationSerializer,
 ):
-    start = serializers.IntegerField(min_value=0)
-    stop = serializers.IntegerField(min_value=0, allow_null=True)
+    start = serializers.IntegerField(
+        min_value=0,
+        help_text="Must be within the task frame bounds.",
+    )
+    stop = serializers.IntegerField(
+        min_value=0,
+        allow_null=True,
+        help_text="Exclusive interval end. May be one greater than the task stop frame.",
+    )
 
 
 class LabeledDataSerializer(serializers.Serializer):
@@ -4470,18 +4513,19 @@ class CloudStorageWriteSerializer(serializers.ModelSerializer):
             credentials_type=validated_data.get("credentials_type"),
             connection_string=validated_data.pop("connection_string", ""),
         )
-        details = {
-            "resource": validated_data.get("resource"),
-            "credentials": credentials,
-            "specific_attributes": parse_specific_attributes(
-                validated_data.get("specific_attributes", "")
-            ),
-        }
+        specific_attributes = parse_specific_attributes(
+            validated_data.get("specific_attributes", "")
+        )
 
-        if prefix := details["specific_attributes"].get("prefix"):
+        if prefix := specific_attributes.get("prefix"):
             self._validate_prefix(prefix)
 
-        storage = get_cloud_storage_instance(cloud_provider=provider_type, **details)
+        storage = get_cloud_storage_client(
+            cloud_provider=provider_type,
+            resource=validated_data.get("resource"),
+            credentials=credentials,
+            specific_attributes=specific_attributes,
+        )
 
         storage_status = storage.get_status()
         if storage_status == Status.AVAILABLE:
@@ -4497,7 +4541,7 @@ class CloudStorageWriteSerializer(serializers.ModelSerializer):
                 models.Manifest(filename=manifest, cloud_storage=db_storage)
                 for manifest in manifests
             ]
-            bulk_create(models.Manifest, manifest_file_instances)
+            db_utils.bulk_create(models.Manifest, manifest_file_instances)
 
             cloud_storage_path = db_storage.get_storage_dirname()
             if os.path.isdir(cloud_storage_path):
@@ -4531,13 +4575,7 @@ class CloudStorageWriteSerializer(serializers.ModelSerializer):
 
     @transaction.atomic
     def update(self, instance, validated_data):
-        credentials = Credentials()
-        credentials.convert_from_db(
-            {
-                "type": instance.credentials_type,
-                "value": instance.credentials,
-            }
-        )
+        credentials = Credentials.from_db(instance.credentials_type, instance.credentials)
         credentials_dict = {
             k: v
             for k, v in validated_data.items()
@@ -4587,7 +4625,7 @@ class CloudStorageWriteSerializer(serializers.ModelSerializer):
             "credentials": credentials,
             "specific_attributes": parse_specific_attributes(instance.specific_attributes),
         }
-        storage = get_cloud_storage_instance(cloud_provider=instance.provider_type, **details)
+        storage = get_cloud_storage_client(cloud_provider=instance.provider_type, **details)
         storage_status = storage.get_status()
         if storage_status == Status.AVAILABLE:
             new_manifest_names = set(i.get("filename") for i in validated_data.get("manifests", []))
@@ -4602,7 +4640,7 @@ class CloudStorageWriteSerializer(serializers.ModelSerializer):
                 manifest_instances = [
                     models.Manifest(filename=f, cloud_storage=instance) for f in delta_to_create
                 ]
-                bulk_create(models.Manifest, manifest_instances)
+                db_utils.bulk_create(models.Manifest, manifest_instances)
             if temporary_file:
                 # so, gcs key file is valid and we need to set correct path to the file
                 real_path_to_key_file = instance.get_key_file_path()
@@ -4776,6 +4814,12 @@ class AssetWriteSerializer(WriteOnceMixin, serializers.ModelSerializer):
         if value.content_type not in settings.ASSET_SUPPORTED_TYPES:
             raise serializers.ValidationError(
                 f"File is not supported as an asset. Supported are {settings.ASSET_SUPPORTED_TYPES}"
+            )
+
+        guessed_type, guessed_encoding = mimetypes.guess_type(value.name)
+        if guessed_type != value.content_type or guessed_encoding is not None:
+            raise serializers.ValidationError(
+                "Provided Content-Type does not match the file extension."
             )
 
         return value

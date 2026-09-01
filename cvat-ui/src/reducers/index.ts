@@ -12,13 +12,43 @@ import {
     Webhook, MLModel, Organization, Job, Task, Project, Label, User,
     QualityConflict, FramesMetaData, RQStatus, Event, Invitation, SerializedAPISchema,
     Request, JobValidationLayout, QualitySettings, TaskValidationLayout, ObjectState,
-    ConsensusSettings, AboutData, ShapeType, ObjectType, ApiToken,
-    Membership, AnnotationFormats, CloudStorage,
+    ConsensusSettings, AboutData, ShapeType, ObjectType, ApiToken, AudioIntervalState,
+    Membership, AnnotationFormats, CloudStorage, UserGrowthData,
 } from 'cvat-core-wrapper';
 
 import type { IntelligentScissors, OpenCVTracker } from 'utils/opencv-wrapper/opencv-wrapper';
 import { KeyMap, KeyMapItem } from 'utils/mousetrap-react';
 import { ImageFilter } from 'utils/image-processing';
+
+export interface AudioState {
+    player: {
+        playing: boolean;
+        currentTime: number;
+        duration: number;
+        playbackRate: number;
+        zoom: number;
+        volume: number;
+        loop: boolean;
+        fitIntervalRequest: { clientID: number } | null;
+        intervals: AudioIntervalState[];
+        activeIntervalID: number | null;
+        hoveredIntervalID: number | null;
+        interactingIntervalID: number | null;
+        contextMenu: {
+            top: number;
+            left: number;
+            clientID: number | null;
+        };
+        audioDataToken: string | null;
+        audioLoading: boolean;
+        audioError: string | null;
+        waveformReady: boolean;
+        activeLabelId: number | null;
+        audioLoadRequest: object | null;
+        seekRequest: { time: number } | null;
+        playIntervalOnceRequest: { intervalID: number } | null;
+    };
+}
 
 export interface AuthState {
     initialized: boolean;
@@ -31,6 +61,12 @@ export interface AuthState {
         current: ApiToken[];
         count: number;
     };
+}
+
+export interface GrowthState {
+    data: UserGrowthData | null;
+    fetching: boolean;
+    initialized: boolean;
 }
 
 export interface ChangePasswordData {
@@ -349,7 +385,7 @@ export interface PluginsState {
         };
         qualityControlPage: {
             task: {
-                overviewTab: ((props: {
+                requirementsTab: ((props: {
                     instance: Task;
                     qualitySettings: {
                         settings: QualitySettings | null;
@@ -369,7 +405,7 @@ export interface PluginsState {
                     }) => JSX.Element)[];
             }
             project : {
-                overviewTab: ((props: {
+                requirementsTab: ((props: {
                     instance: Project;
                     qualitySettings: {
                         settings: QualitySettings | null;
@@ -388,6 +424,11 @@ export interface PluginsState {
         };
     },
     components: {
+        qualityControlPage: {
+            tabs: {
+                items: PluginComponent[];
+            };
+        };
         header: {
             userMenu: {
                 items: PluginComponent[];
@@ -404,6 +445,20 @@ export interface PluginsState {
                 items: PluginComponent[];
             };
         }
+        taskPage: {
+            details: {
+                topBar: {
+                    extras: PluginComponent[];
+                };
+            };
+        };
+        projectPage: {
+            details: {
+                topBar: {
+                    extras: PluginComponent[];
+                };
+            };
+        };
         modelsPage: {
             topBar: {
                 items: PluginComponent[];
@@ -776,16 +831,17 @@ export enum ActiveControl {
     DRAW_MASK = 'draw_mask',
     DRAW_CUBOID = 'draw_cuboid',
     DRAW_SKELETON = 'draw_skeleton',
-    MERGE = 'merge',
     GROUP = 'group',
+    MERGE = 'merge',
     JOIN = 'join',
     SPLIT = 'split',
     SLICE = 'slice',
     EDIT = 'edit',
     OPEN_ISSUE = 'open_issue',
     AI_TOOLS = 'ai_tools',
-    PHOTO_CONTEXT = 'PHOTO_CONTEXT',
     OPENCV_TOOLS = 'opencv_tools',
+    AUDIO_REGION_CREATE = 'audio_region_create',
+    AUDIO_REGION_RECORD = 'audio_region_record',
 }
 
 export enum StatesOrdering {
@@ -912,8 +968,8 @@ export interface AnnotationState {
         resetGroupFlag: boolean;
         initialized: boolean;
         history: {
-            undo: [string, number][];
-            redo: [string, number][];
+            undo: [string, number | null][];
+            redo: [string, number | null][];
         };
         saving: {
             forceExit: boolean;
@@ -923,6 +979,7 @@ export interface AnnotationState {
             min: number;
             max: number;
             cur: number;
+            hiddenByFrame: Map<number, Set<number>>;
         };
     };
     remove: {
@@ -958,6 +1015,7 @@ export enum Workspace {
     SINGLE_SHAPE = 'Single shape',
     TAGS = 'Tag annotation',
     REVIEW = 'Review',
+    AUDIO = 'Audio annotation',
 }
 
 export enum GridColor {
@@ -1171,6 +1229,7 @@ export interface NavigationState {
 
 export interface CombinedState {
     auth: AuthState;
+    growth: GrowthState;
     projects: ProjectsState;
     jobs: JobsState;
     tasks: TasksState;
@@ -1181,6 +1240,7 @@ export interface CombinedState {
     models: ModelsState;
     notifications: NotificationsState;
     annotation: AnnotationState;
+    audio: AudioState;
     settings: SettingsState;
     shortcuts: ShortcutsState;
     review: ReviewState;

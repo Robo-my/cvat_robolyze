@@ -79,6 +79,10 @@ import SVGSnapToolsIcon from './assets/snap-tools-icon.svg';
 import SVGSnapToContourIcon from './assets/snap-to-contour-icon.svg';
 import SVGSnapToPointIcon from './assets/snap-to-point-icon.svg';
 import SVGLayerStackIcon from './assets/layer-stack-icon.svg';
+import SVGIntervalToolsIcon from './assets/interval-tools-icon.svg';
+import SVGPlayRangeIcon from './assets/play-range-icon.svg';
+import SVGSeekToStartIcon from './assets/seek-to-start-icon.svg';
+import SVGSeekToEndIcon from './assets/seek-to-end-icon.svg';
 
 export const CVATIcon = React.memo((): JSX.Element => <SVGCVATIcon />);
 export const CursorIcon = React.memo((): JSX.Element => <SVGCursorIcon />);
@@ -154,3 +158,7 @@ export const SnapToolsIcon = React.memo((): JSX.Element => <SVGSnapToolsIcon />)
 export const SnapToContourIcon = React.memo((): JSX.Element => <SVGSnapToContourIcon />);
 export const SnapToPointIcon = React.memo((): JSX.Element => <SVGSnapToPointIcon />);
 export const LayerStackIcon = React.memo((): JSX.Element => <SVGLayerStackIcon />);
+export const IntervalToolsIcon = React.memo((): JSX.Element => <SVGIntervalToolsIcon />);
+export const PlayRangeIcon = React.memo((): JSX.Element => <SVGPlayRangeIcon />);
+export const SeekToStartIcon = React.memo((): JSX.Element => <SVGSeekToStartIcon />);
+export const SeekToEndIcon = React.memo((): JSX.Element => <SVGSeekToEndIcon />);

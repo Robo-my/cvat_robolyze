@@ -21,7 +21,6 @@ from typing import Any, cast
 import django_rq
 from attr.converters import to_bool
 from django.conf import settings
-from django.contrib.auth.models import User
 from django.core.files.storage import storages
 from django.db import IntegrityError, transaction
 from django.db.models.query import Prefetch, prefetch_related_objects
@@ -39,13 +38,12 @@ from rest_framework import mixins, serializers, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import APIException, NotFound, PermissionDenied, ValidationError
 from rest_framework.parsers import MultiPartParser
-from rest_framework.permissions import SAFE_METHODS, IsAuthenticated
+from rest_framework.permissions import SAFE_METHODS
 from rest_framework.response import Response
 from rest_framework.settings import api_settings
 from rq.job import Job as RQJob
 
 import cvat.apps.dataset_manager as dm
-import cvat.apps.dataset_manager.views  # pylint: disable=unused-import
 from cvat.apps.dataset_manager.serializers import DatasetFormatsSerializer
 from cvat.apps.engine import backup
 from cvat.apps.engine.background import BackupImporter, DatasetImporter, TaskCreator
@@ -56,7 +54,6 @@ from cvat.apps.engine.cache import (
     MediaCache,
 )
 from cvat.apps.engine.cloud_provider import Status as CloudStorageStatus
-from cvat.apps.engine.cloud_provider import db_storage_to_storage_instance
 from cvat.apps.engine.exceptions import CloudStorageMissingError
 from cvat.apps.engine.media_extractors import get_mime, get_video_chapters
 from cvat.apps.engine.media_io.audio_provider import (
@@ -65,13 +62,12 @@ from cvat.apps.engine.media_io.audio_provider import (
     TaskAudioProvider,
 )
 from cvat.apps.engine.media_io.frame_provider import (
-    DataWithMeta,
     IFrameProvider,
     JobFrameProvider,
     TaskFrameProvider,
 )
+from cvat.apps.engine.media_io.media_provider import DataWithMeta, PreviewNotAvailable
 from cvat.apps.engine.mixins import BackupMixin, DatasetMixin, PartialUpdateModelMixin, UploadMixin
-from cvat.apps.engine.model_utils import bulk_create
 from cvat.apps.engine.models import (
     AnnotationGuide,
     Asset,
@@ -147,6 +143,7 @@ from cvat.apps.engine.serializers import (
     TaskWriteSerializer,
     UserSerializer,
 )
+from cvat.apps.engine.task import ensure_task_is_initialized
 from cvat.apps.engine.tus import TusFile
 from cvat.apps.engine.types import ExtendedRequest
 from cvat.apps.engine.utils import parse_exception_message, sendfile
@@ -156,8 +153,9 @@ from cvat.apps.engine.view_utils import (
     tus_chunk_action,
 )
 from cvat.apps.iam.filters import ORGANIZATION_OPEN_API_PARAMETERS
-from cvat.apps.iam.permissions import IsAuthenticatedOrReadPublicResource
+from cvat.apps.iam.models import User
 from cvat.apps.redis_handler.serializers import RqIdSerializer
+from cvat.utils import django_database as db_utils
 from cvat.utils.paths import join_untrusted_path, problem_with_untrusted_path
 from utils.dataset_manifest import ImageManifestManager
 
@@ -600,8 +598,25 @@ class ProjectViewSet(
 
     @extend_schema(
         summary="Get a preview image for a project",
+        parameters=[
+            OpenApiParameter(
+                "Prefer",
+                type=OpenApiTypes.STR,
+                location=OpenApiParameter.HEADER,
+                required=False,
+                description="RFC 7240 preference token. Send `handling=empty` to "
+                "receive a 204 No Content response when no media-derived preview "
+                "exists. Without the preference, the server returns a default "
+                "placeholder image with status 200.",
+            ),
+        ],
         responses={
             "200": OpenApiResponse(description="Project image preview"),
+            "204": OpenApiResponse(
+                description="No media-derived preview is available. The client should "
+                "render a placeholder image. Only returned when the request opts in "
+                "via `Prefer: handling=empty`."
+            ),
             "404": OpenApiResponse(description="Project image preview not found"),
         },
     )
@@ -617,6 +632,7 @@ class ProjectViewSet(
             db_task=first_task,
             data_type="preview",
             data_quality="compressed",
+            allow_empty_preview=_wants_empty_preview(request),
         )
 
         return data_getter()
@@ -639,6 +655,21 @@ class ProjectViewSet(
             response["progress"] = rq_job_meta.progress or 0.0
 
         return response
+
+
+_PREFER_HANDLING_EMPTY = "handling=empty"
+
+
+def _wants_empty_preview(request: ExtendedRequest) -> bool:
+    """Return True if the request opts in to 204-on-empty via ``Prefer: handling=empty``."""
+    for token in request.headers.get("Prefer", "").split(","):
+        key, _, value = token.strip().partition("=")
+        value = value.strip()
+        if len(value) >= 2 and value[0] == '"' and value[-1] == '"':
+            value = value[1:-1]
+        if key.strip().lower() == "handling" and value.lower() == "empty":
+            return True
+    return False
 
 
 class _RangeHeaderSyntaxError(Exception): ...
@@ -678,6 +709,8 @@ class _DataGetter(metaclass=ABCMeta):
         data_type: str,
         data_num: str | int | None,
         data_quality: str,
+        *,
+        allow_empty_preview: bool = False,
         data_range: tuple[int | None, int | None] | None = None,
     ) -> None:
         possible_data_type_values = ("chunk", "frame", "preview", "context_image")
@@ -696,6 +729,7 @@ class _DataGetter(metaclass=ABCMeta):
         self.quality = (
             FrameQuality.COMPRESSED if data_quality == "compressed" else FrameQuality.ORIGINAL
         )
+        self.allow_empty_preview = allow_empty_preview
         self._range = data_range
 
     @abstractmethod
@@ -774,8 +808,22 @@ class _DataGetter(metaclass=ABCMeta):
             data = media_provider.get_frame(self.number, quality=self.quality)
             return HttpResponse(data.data.getvalue(), content_type=data.mime)
         elif self.type == "preview":
-            data = media_provider.get_preview_image()
-            return HttpResponse(data.data.getvalue(), content_type=data.mime)
+            preview_headers = {"Vary": "Prefer"}
+            if self.allow_empty_preview:
+                preview_headers["Preference-Applied"] = _PREFER_HANDLING_EMPTY
+
+            try:
+                data = media_provider.get_preview_image(allow_empty=self.allow_empty_preview)
+            except PreviewNotAvailable:
+                return HttpResponse(
+                    status=status.HTTP_204_NO_CONTENT,
+                    headers=preview_headers,
+                )
+            return HttpResponse(
+                data.data.getvalue(),
+                content_type=data.mime,
+                headers=preview_headers,
+            )
         elif self.type == "context_image":
             if isinstance(media_provider, IAudioProvider):
                 raise ValidationError(
@@ -851,12 +899,14 @@ class _TaskDataGetter(_DataGetter):
         data_type: str,
         data_quality: str,
         data_num: str | int | None = None,
+        allow_empty_preview: bool = False,
         data_range: tuple[int | None, int | None] | None = None,
     ) -> None:
         super().__init__(
             data_type=data_type,
             data_num=data_num,
             data_quality=data_quality,
+            allow_empty_preview=allow_empty_preview,
             data_range=data_range,
         )
         self._db_task = db_task
@@ -867,6 +917,8 @@ class _TaskDataGetter(_DataGetter):
                 return TaskAudioProvider(self._db_task)
             case models.MediaType.IMAGE | models.MediaType.POINT_CLOUD:
                 return TaskFrameProvider(self._db_task)
+            case "":
+                raise NotFound("Task has no media")
             case _ as media_type:
                 assert False, f"Unknown media type {media_type}"
 
@@ -886,6 +938,7 @@ class _JobDataGetter(_DataGetter):
         data_quality: str,
         data_num: str | int | None = None,
         data_index: str | int | None = None,
+        allow_empty_preview: bool = False,
         data_range: tuple[int | None, int | None] | None = None,
     ) -> None:
         possible_data_type_values = ("chunk", "frame", "preview", "context_image")
@@ -913,6 +966,7 @@ class _JobDataGetter(_DataGetter):
             FrameQuality.COMPRESSED if data_quality == "compressed" else FrameQuality.ORIGINAL
         )
 
+        self.allow_empty_preview = allow_empty_preview
         self._range = data_range
         self._db_job = db_job
 
@@ -1213,7 +1267,7 @@ class TaskViewSet(
         return get_410_response_for_export_api("/api/tasks/id/backup/export")
 
     @transaction.atomic
-    def perform_update(self, serializer):
+    def perform_update(self, serializer: TaskWriteSerializer) -> None:
         instance = serializer.instance
 
         super().perform_update(serializer)
@@ -1266,7 +1320,7 @@ class TaskViewSet(
     def _append_upload_info_entries(self, client_files: list[dict[str, Any]]):
         # batch version of _maybe_append_upload_info_entry() without optional insertion
         task_data = cast(Data, self._object.data)
-        bulk_create(
+        db_utils.bulk_create(
             ClientFile,
             [
                 ClientFile(file=self._prepare_upload_info_entry(cf["file"].name), data=task_data)
@@ -1577,17 +1631,16 @@ class TaskViewSet(
                 # other aggregations that are defined by the viewset queryset,
                 # we just need to lock 1 row with the target Task entity.
                 locked_instance = Task.objects.select_for_update().get(pk=pk)
-                task_data = locked_instance.data
-                if not task_data:
+                if locked_instance.is_initialized:
+                    raise ValidationError("Adding more data is not supported")
+
+                if not locked_instance.data_id:
                     task_data = Data.objects.create()
                     task_data.make_dirs()
                     locked_instance.data = task_data
                     self._object.data = task_data
                     locked_instance.save()
-                elif task_data.size != 0:
-                    return Response(
-                        data="Adding more data is not supported", status=status.HTTP_400_BAD_REQUEST
-                    )
+
                 return self.upload_data(request, append_url_name="append-data-chunk")
         else:
             data_type = request.query_params.get("type", None)
@@ -1747,6 +1800,8 @@ class TaskViewSet(
             return Response(data)
 
         elif request.method == "POST" or request.method == "OPTIONS":
+            ensure_task_is_initialized(task=self._object)
+
             return self.upload_data(request, append_url_name="append-annotations-chunk")
 
         elif request.method == "PUT":
@@ -1898,6 +1953,8 @@ class TaskViewSet(
         prefetch()
 
         if request.method == "PATCH":
+            ensure_task_is_initialized(task=db_task)
+
             if db_task.media_type == models.MediaType.AUDIO:
                 # TODO: introduce support for frame deletion when there's more information
                 # on use cases. Should probably work with ranges.
@@ -1908,7 +1965,7 @@ class TaskViewSet(
             db_task.data = serializer.save()
 
         db_data = db_task.data
-        if db_data is None:
+        if db_data is None or not db_task.media_type:
             raise ValidationError("Data is not uploaded for the task yet")
 
         if (
@@ -1965,8 +2022,25 @@ class TaskViewSet(
 
     @extend_schema(
         summary="Get a preview image for a task",
+        parameters=[
+            OpenApiParameter(
+                "Prefer",
+                type=OpenApiTypes.STR,
+                location=OpenApiParameter.HEADER,
+                required=False,
+                description="RFC 7240 preference token. Send `handling=empty` to "
+                "receive a 204 No Content response when no media-derived preview "
+                "exists. Without the preference, the server returns a default "
+                "placeholder image with status 200.",
+            ),
+        ],
         responses={
             "200": OpenApiResponse(description="Task image preview"),
+            "204": OpenApiResponse(
+                description="No media-derived preview is available. The client should "
+                "render a placeholder image. Only returned when the request opts in "
+                "via `Prefer: handling=empty`."
+            ),
             "404": OpenApiResponse(description="Task image preview not found"),
         },
     )
@@ -1981,6 +2055,7 @@ class TaskViewSet(
             db_task=self._object,
             data_type="preview",
             data_quality="compressed",
+            allow_empty_preview=_wants_empty_preview(request),
         )
         return data_getter()
 
@@ -2422,7 +2497,6 @@ class JobViewSet(
     def annotations(self, request: ExtendedRequest, pk: int):
         self._object: models.Job = self.get_object()  # force call of check_object_permissions()
         if request.method == "GET":
-
             if {
                 "format",
                 "filename",
@@ -2713,8 +2787,25 @@ class JobViewSet(
 
     @extend_schema(
         summary="Get a preview image for a job",
+        parameters=[
+            OpenApiParameter(
+                "Prefer",
+                type=OpenApiTypes.STR,
+                location=OpenApiParameter.HEADER,
+                required=False,
+                description="RFC 7240 preference token. Send `handling=empty` to "
+                "receive a 204 No Content response when no media-derived preview "
+                "exists. Without the preference, the server returns a default "
+                "placeholder image with status 200.",
+            ),
+        ],
         responses={
             "200": OpenApiResponse(description="Job image preview"),
+            "204": OpenApiResponse(
+                description="No media-derived preview is available. The client should "
+                "render a placeholder image. Only returned when the request opts in "
+                "via `Prefer: handling=empty`."
+            ),
         },
     )
     @action(detail=True, methods=["GET"], url_path="preview")
@@ -2725,6 +2816,7 @@ class JobViewSet(
             db_job=self._object,
             data_type="preview",
             data_quality="compressed",
+            allow_empty_preview=_wants_empty_preview(request),
         )
         return data_getter()
 
@@ -3094,7 +3186,7 @@ class LabelViewSet(
         kwargs["local"] = True
         return super().get_serializer(*args, **kwargs)
 
-    def perform_update(self, serializer):
+    def perform_update(self, serializer: LabelSerializer) -> None:
         if serializer.instance.parent is not None:
             # NOTE: this can be relaxed when skeleton updates are implemented properly
             raise ValidationError(
@@ -3105,7 +3197,7 @@ class LabelViewSet(
 
         return super().perform_update(serializer)
 
-    def perform_destroy(self, instance: models.Label):
+    def perform_destroy(self, instance: models.Label) -> None:
         if instance.parent is not None:
             # NOTE: this can be relaxed when skeleton updates are implemented properly
             raise ValidationError(
@@ -3369,10 +3461,9 @@ class CloudStorageViewSet(
     )
     @action(detail=True, methods=["GET"], url_path="content-v2")
     def content_v2(self, request: ExtendedRequest, pk: int):
-        storage = None
         try:
             db_storage = self.get_object()
-            storage = db_storage_to_storage_instance(db_storage)
+            storage_client = db_storage.get_client()
             prefix = request.query_params.get("prefix", "")
             page_size = request.query_params.get(
                 "page_size", str(settings.BUCKET_CONTENT_MAX_PAGE_SIZE)
@@ -3399,8 +3490,8 @@ class CloudStorageViewSet(
 
                 if not full_manifest_path.exists() or datetime.fromtimestamp(
                     full_manifest_path.stat().st_mtime, tz=timezone.utc
-                ) < storage.get_file_last_modified(manifest_path):
-                    storage.download_file(manifest_path, full_manifest_path)
+                ) < storage_client.get_file_last_modified(manifest_path):
+                    storage_client.download_file(manifest_path, full_manifest_path)
                 manifest = ImageManifestManager(
                     full_manifest_path, db_storage.get_storage_dirname()
                 )
@@ -3416,11 +3507,11 @@ class CloudStorageViewSet(
                     page_size,
                     manifest_prefix=manifest_prefix,
                     prefix=prefix,
-                    default_prefix=storage.prefix,
+                    default_prefix=storage_client.prefix,
                     start_index=start_index,
                 )
             else:
-                content = storage.list_files_on_one_page(
+                content = storage_client.list_files_on_one_page(
                     prefix, next_token=next_token, page_size=page_size, _use_sort=True
                 )
             for i in content["content"]:
@@ -3516,8 +3607,7 @@ class CloudStorageViewSet(
     def status(self, request: ExtendedRequest, pk: int):
         try:
             db_storage = self.get_object()
-            storage = db_storage_to_storage_instance(db_storage)
-            storage_status = storage.get_status()
+            storage_status = db_storage.get_client().get_status()
             return Response(storage_status)
         except CloudStorage.DoesNotExist:
             message = f"Storage {pk} does not exist"
@@ -3539,8 +3629,7 @@ class CloudStorageViewSet(
         """
         try:
             db_storage = self.get_object()
-            storage = db_storage_to_storage_instance(db_storage)
-            actions = storage.supported_actions
+            actions = db_storage.get_client().supported_actions
             return Response(actions, content_type="text/plain")
         except CloudStorage.DoesNotExist:
             message = f"Storage {pk} does not exist"
@@ -3593,16 +3682,6 @@ class AssetsViewSet(
     def check_object_permissions(self, request: ExtendedRequest, obj):
         super().check_object_permissions(request, obj.guide)
 
-    def get_permissions(self):
-        permissions = super().get_permissions()
-
-        if self.action == "retrieve":
-            permissions = [IsAuthenticatedOrReadPublicResource()] + [
-                p for p in permissions if not isinstance(p, IsAuthenticated)
-            ]
-
-        return permissions
-
     def get_serializer_class(self):
         if self.request.method in SAFE_METHODS:
             return AssetReadSerializer
@@ -3617,7 +3696,7 @@ class AssetsViewSet(
             pk=serializer.validated_data["guide_id"]
         )
         if db_guide.assets.count() >= settings.ASSET_MAX_COUNT_PER_GUIDE:
-            raise ValidationError(f"Maximum number of assets per guide reached")
+            raise ValidationError("Maximum number of assets per guide reached")
 
         serializer.save(owner=self.request.user)
         return Response(
@@ -3629,9 +3708,13 @@ class AssetsViewSet(
 
     def retrieve(self, request: ExtendedRequest, *args, **kwargs):
         instance = self.get_object()
-        return sendfile(
+        response = sendfile(
             request, os.path.join(settings.ASSETS_ROOT, str(instance.uuid), instance.filename)
         )
+        # A backup measure in case a way is found to sneak malicious content
+        # into one of the asset formats we allow.
+        response["Content-Security-Policy"] = "default-src 'none'; sandbox"
+        return response
 
     def perform_destroy(self, instance):
         full_path = os.path.join(instance.get_asset_dir(), instance.filename)

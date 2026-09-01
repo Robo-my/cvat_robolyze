@@ -133,7 +133,7 @@ context('Manipulations with skeletons', { scrollBehavior: false }, () => {
             cy.get(selector).should('not.exist');
         }
 
-        it('Wrapping bounding box for a skeleton is visible only when skeleton is activated', () => {
+        it('Wrapping bounding box for a skeleton is not visible regardless of activation state', () => {
             createSkeletonObject('shape');
 
             cy.get('body').click();
@@ -141,8 +141,23 @@ context('Manipulations with skeletons', { scrollBehavior: false }, () => {
                 cy.get('.cvat_canvas_skeleton_wrapping_rect').should('exist').and('not.be.visible');
                 cy.wrap($el).trigger('mousemove');
                 cy.wrap($el).should('have.class', 'cvat_canvas_shape_activated');
-                cy.get('.cvat_canvas_skeleton_wrapping_rect').should('exist').and('be.visible');
+                cy.get('.cvat_canvas_skeleton_wrapping_rect').should('exist').and('not.be.visible');
             });
+
+            cy.removeAnnotations();
+        });
+
+        it('Control points for a skeleton exist only when skeleton is activated', () => {
+            createSkeletonObject('shape');
+
+            cy.get('body').click();
+
+            cy.get('.cvat_canvas_skeleton_control_point').should('not.exist');
+
+            cy.get('#cvat_canvas_shape_1').trigger('mousemove');
+            cy.get('#cvat_canvas_shape_1').should('have.class', 'cvat_canvas_shape_activated');
+
+            cy.get('.cvat_canvas_skeleton_control_point').should('have.length', 9);
 
             cy.removeAnnotations();
         });
@@ -154,6 +169,40 @@ context('Manipulations with skeletons', { scrollBehavior: false }, () => {
                 cy.get('span[aria-label="user"]').click();
             });
             cy.get('#cvat_canvas_shape_2').should('have.class', 'cvat_canvas_shape_occluded');
+
+            deleteSkeleton('#cvat_canvas_shape_1', 'shape', false);
+            cy.removeAnnotations();
+        });
+
+        it('Undo and redo outside property for a skeleton point', () => {
+            createSkeletonObject('shape');
+
+            const skeletonPointSelector = '#cvat-objects-sidebar-state-item-element-2';
+            cy.get(skeletonPointSelector).within(() => {
+                cy.get('.cvat-object-item-button-outside').click();
+                cy.get('.cvat-object-item-button-outside-enabled').should('exist');
+                cy.get('.cvat-object-item-button-occluded-enabled').should('not.exist');
+            });
+
+            cy.get('.cvat-annotation-header-undo-button').trigger('mouseover');
+            cy.get('.ant-tooltip-inner').should('contain.text', 'Undo: Changed outside');
+            cy.get('.cvat-annotation-header-undo-button').click();
+            cy.get(skeletonPointSelector).within(() => {
+                cy.get('.cvat-object-item-button-outside-enabled').should('not.exist');
+                cy.get('.cvat-object-item-button-occluded-enabled').should('not.exist');
+            });
+
+            cy.get('.cvat-annotation-header-redo-button').click();
+            cy.get(skeletonPointSelector).within(() => {
+                cy.get('.cvat-object-item-button-outside-enabled').should('exist');
+                cy.get('.cvat-object-item-button-occluded-enabled').should('not.exist');
+            });
+
+            cy.get('.cvat-annotation-header-undo-button').click();
+            cy.get(skeletonPointSelector).within(() => {
+                cy.get('.cvat-object-item-button-outside-enabled').should('not.exist');
+                cy.get('.cvat-object-item-button-occluded-enabled').should('not.exist');
+            });
 
             deleteSkeleton('#cvat_canvas_shape_1', 'shape', false);
             cy.removeAnnotations();

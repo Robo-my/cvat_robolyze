@@ -138,6 +138,7 @@ export interface InteractionData {
         shapes: {
             shapeType: string;
             points: ArrayLike<number>;
+            maskOutlines?: ArrayLike<number>[];
         }[];
     };
     settings?: {
@@ -145,6 +146,8 @@ export interface InteractionData {
         points_type?: 'any' | 'positive' | 'negative'; // default is any
         removalStrategy?: 'any' | 'last'; // default is any
         appendCursorPositionAsPoint?: boolean; // default is false
+        hint?: string;
+        regionOfInterest?: [number, number, number, number];
     };
 }
 

@@ -11,20 +11,29 @@ import { ChunkQuality } from 'cvat-data';
 import './axios-config';
 import { axiosTusHttpStack } from './axios-tus';
 import {
-    SerializedLabel, SerializedAnnotationFormats, ProjectsFilter,
-    SerializedProject, SerializedTask, TasksFilter, SerializedUser, SerializedOrganization,
+    SerializedLabel, SerializedAnnotationFormats,
+    SerializedProject, SerializedTask, SerializedUser, SerializedOrganization,
     SerializedAbout, SerializedRemoteFile, SerializedUserAgreement, SerializedFunctionRequest,
-    SerializedRegister, JobsFilter, SerializedJob, SerializedGuide, SerializedAsset, SerializedAPISchema,
+    SerializedRegister, SerializedJob, SerializedGuide, SerializedAsset, SerializedAPISchema,
     SerializedInvitationData, SerializedCloudStorage, SerializedFramesMetaData, SerializedCollection,
-    SerializedQualitySettingsData, APIQualitySettingsFilter, SerializedQualityConflictData, APIQualityConflictsFilter,
-    SerializedQualityReportData, APIQualityReportsFilter, APIAnalyticsEventsFilter, APIConsensusSettingsFilter,
     SerializedRequest, SerializedJobValidationLayout, SerializedTaskValidationLayout, SerializedConsensusSettingsData,
-    SerializedApiToken, APIApiTokensFilter,
+    SerializedApiToken, SerializedUserGrowthData,
 } from './server-response-types';
-import { APIApiTokenModifiableFields } from './server-request-types';
+import {
+    SerializedQualityConflictData, SerializedQualityReportData,
+    SerializedQualityRequirementData, SerializedQualityRequirementSaveData,
+    SerializedQualitySettingsData, SerializedQualitySettingsSaveData,
+} from './quality/server-response-types';
+import {
+    APIApiTokenModifiableFields, APIUserGrowthDataModifiableFields,
+    ProjectsFilter, TasksFilter, JobsFilter,
+    APIQualitySettingsFilter, APIQualityConflictsFilter, APIQualityReportsFilter,
+    APIAnalyticsEventsFilter, APIConsensusSettingsFilter, APIApiTokensFilter, APIQualityRequirementsFilter,
+} from './server-request-types';
 import { PaginatedResource, SerializedModel, UpdateStatusData } from './core-types';
 import { Storage } from './storage';
 import { SerializedEvent } from './event';
+import type { WebhookEvent } from './webhook';
 import { RQStatus, StorageLocation, WebhookSourceType } from './enums';
 import { isEmail, isResourceURL } from './common';
 import config from './config';
@@ -42,6 +51,12 @@ type Params = {
 };
 
 type HealthCheckResponse = Record<string, string>;
+
+const totalBandwidthInfo = {
+    totalDownloadBytes: 0,
+    totalDownloadTimeMs: 0,
+    totalDownloadRetries: 0,
+};
 
 tus.defaultOptions.storeFingerprintForResuming = false;
 
@@ -295,7 +310,11 @@ class WorkerWrappedAxios {
             if (e.data.id in requests) {
                 try {
                     if (e.data.isSuccess) {
-                        requests[e.data.id].resolve({ data: e.data.responseData, headers: e.data.headers });
+                        requests[e.data.id].resolve({
+                            data: e.data.responseData,
+                            headers: e.data.headers,
+                            telemetry: e.data.telemetry,
+                        });
                     } else {
                         let response: AxiosResponse | undefined;
                         let code: AxiosError['code'];
@@ -861,6 +880,17 @@ async function createProject(projectSpec: SerializedProject): Promise<Serialized
     }
 }
 
+function normaliseTask(task: SerializedTask): SerializedTask {
+    // Server returns '' for media_type/mode/dimension on tasks without uploaded data;
+    // collapse to undefined so downstream consumers see a clean optional value.
+    return {
+        ...task,
+        media_type: (task.media_type as unknown) === '' ? undefined : task.media_type,
+        mode: (task.mode as unknown) === '' ? undefined : task.mode,
+        dimension: (task.dimension as unknown) === '' ? undefined : task.dimension,
+    };
+}
+
 async function getTasks(
     filter: TasksFilter = {},
     aggregate?: boolean,
@@ -877,7 +907,7 @@ async function getTasks(
             };
         } else if ('id' in filter) {
             response = await Axios.get(`${backendAPI}/tasks/${filter.id}`);
-            const results = [response.data];
+            const results = [normaliseTask(response.data)];
             Object.defineProperty(results, 'count', {
                 value: 1,
             });
@@ -895,8 +925,9 @@ async function getTasks(
         throw generateError(errorData);
     }
 
-    response.data.results.count = response.data.count;
-    return response.data.results;
+    const results = response.data.results.map(normaliseTask) as PaginatedResource<SerializedTask>;
+    results.count = response.data.count;
+    return results;
 }
 
 async function saveTask(id: number, taskData: Record<string, unknown>): Promise<SerializedTask> {
@@ -909,7 +940,7 @@ async function saveTask(id: number, taskData: Record<string, unknown>): Promise<
         throw generateError(errorData);
     }
 
-    return response.data;
+    return normaliseTask(response.data);
 }
 
 async function deleteTask(id: number, organizationID: string | null = null): Promise<void> {
@@ -1617,16 +1648,51 @@ async function updateUser(id: number, userData: Partial<SerializedUser>): Promis
     return response.data;
 }
 
+async function getGrowthData(userId: number): Promise<SerializedUserGrowthData[]> {
+    const { backendAPI } = config;
+    try {
+        const response = await Axios.get(`${backendAPI}/growth`, {
+            params: { user_id: userId, ...enableOrganization() },
+        });
+        return response.data.results;
+    } catch (errorData) {
+        throw generateError(errorData);
+    }
+}
+
+async function updateGrowthData(
+    id: number,
+    growthData: APIUserGrowthDataModifiableFields,
+): Promise<SerializedUserGrowthData> {
+    const { backendAPI } = config;
+
+    try {
+        const response = await Axios.patch(`${backendAPI}/growth/${id}`, growthData, {
+            params: enableOrganization(),
+        });
+        return response.data;
+    } catch (errorData) {
+        throw generateError(errorData);
+    }
+}
+
+export const PREVIEW_DEFAULT = Symbol('preview-default');
+export type PreviewResponse = Blob | typeof PREVIEW_DEFAULT | null;
+
 function getPreview(instance: 'projects' | 'tasks' | 'jobs' | 'cloudstorages' | 'functions') {
-    return async function (id: number | string): Promise<Blob | null> {
+    return async function (id: number | string): Promise<PreviewResponse> {
         const { backendAPI } = config;
 
-        let response = null;
         try {
             const url = `${backendAPI}/${instance}/${id}/preview`;
-            response = await Axios.get(url, {
+            const response = await Axios.get(url, {
                 responseType: 'blob',
+                headers: { Prefer: 'handling=empty' },
             });
+
+            if (response.status === 204) {
+                return PREVIEW_DEFAULT;
+            }
 
             return response.data;
         } catch (errorData) {
@@ -1677,7 +1743,53 @@ async function getData(jid: number, chunk: number, quality: ChunkQuality): Promi
             responseType: 'arraybuffer',
         });
 
+        if (response.telemetry) {
+            totalBandwidthInfo.totalDownloadBytes += response.telemetry.chunkSizeBytes;
+            totalBandwidthInfo.totalDownloadTimeMs += response.telemetry.downloadTimeMs;
+            totalBandwidthInfo.totalDownloadRetries += response.telemetry.retries;
+        }
+
         return response.data;
+    } catch (errorData) {
+        throw generateError(errorData);
+    }
+}
+
+function getAndResetBandwidthInfo(): typeof totalBandwidthInfo {
+    const result = { ...totalBandwidthInfo };
+
+    totalBandwidthInfo.totalDownloadBytes = 0;
+    totalBandwidthInfo.totalDownloadTimeMs = 0;
+    totalBandwidthInfo.totalDownloadRetries = 0;
+
+    return result;
+}
+
+interface AudioChunkResponse {
+    data: ArrayBuffer;
+    contentOffset: number;
+}
+
+async function getAudioChunk(
+    jid: number,
+    chunk: number,
+    quality: ChunkQuality,
+): Promise<AudioChunkResponse> {
+    const { backendAPI } = config;
+
+    try {
+        const response = await Axios.get(`${backendAPI}/jobs/${jid}/data`, {
+            params: {
+                ...enableOrganization(),
+                quality,
+                type: 'chunk',
+                index: chunk,
+            },
+            responseType: 'arraybuffer',
+        });
+
+        const contentOffset = parseInt(response.headers['x-media-offset'] || '0', 10);
+        return { data: response.data, contentOffset };
     } catch (errorData) {
         throw generateError(errorData);
     }
@@ -1748,7 +1860,8 @@ async function updateAnnotations(
 
     let response = null;
     try {
-        response = await Axios(url, { method, data, params });
+        // Annotation version is unused by the server now, but older API schema still accepts it.
+        response = await Axios(url, { method, data: { ...data, version: 0 }, params });
     } catch (errorData) {
         throw generateError(errorData);
     }
@@ -1813,13 +1926,17 @@ async function uploadAnnotations(
 
 async function saveEvents(events: {
     events: SerializedEvent[];
-    previous_event?: SerializedEvent;
     timestamp: string;
-}): Promise<void> {
+    previous_event?: SerializedEvent;
+}, options: { keepalive?: boolean } = {}): Promise<void> {
     const { backendAPI } = config;
 
     try {
-        await Axios.post(`${backendAPI}/events`, events);
+        await Axios.post(`${backendAPI}/events`, events, options.keepalive ? {
+            // The fetch adapter can keep this best-effort request alive while the page is being unloaded.
+            adapter: 'fetch',
+            fetchOptions: { keepalive: true },
+        } : undefined);
     } catch (errorData) {
         throw generateError(errorData);
     }
@@ -1885,7 +2002,9 @@ async function getLambdaFunctions(): Promise<SerializedModel[]> {
         const response = await Axios.get(url);
         return response.data;
     } catch (errorData) {
-        if (errorData.response.status === 503) {
+        // 503 => the serverless (Nuclio) backend is not deployed/available,
+        // so there are no lambda functions to list.
+        if (errorData.response?.status === 503) {
             return [];
         }
         throw generateError(errorData);
@@ -2310,7 +2429,7 @@ async function pingWebhook(webhookID: number): Promise<any> {
     }
 }
 
-async function receiveWebhookEvents(type: WebhookSourceType): Promise<string[]> {
+async function receiveWebhookEvents(type: WebhookSourceType): Promise<WebhookEvent[]> {
     const { backendAPI } = config;
 
     try {
@@ -2410,7 +2529,7 @@ async function getQualitySettings(
 
 async function updateQualitySettings(
     settingsID: number,
-    settingsData: SerializedQualitySettingsData,
+    settingsData: SerializedQualitySettingsSaveData,
 ): Promise<SerializedQualitySettingsData> {
     const params = enableOrganization();
     const { backendAPI } = config;
@@ -2421,6 +2540,86 @@ async function updateQualitySettings(
         });
 
         return response.data;
+    } catch (errorData) {
+        throw generateError(errorData);
+    }
+}
+
+async function getQualityRequirements(
+    filter: APIQualityRequirementsFilter,
+    aggregate?: boolean,
+): Promise<PaginatedResource<SerializedQualityRequirementData>> {
+    const { backendAPI } = config;
+
+    let response = null;
+    try {
+        if (aggregate) {
+            response = {
+                data: await fetchAll<SerializedQualityRequirementData & { id: number }>(
+                    `${backendAPI}/quality/settings/requirements`, {
+                        ...filter,
+                        ...enableOrganization(),
+                    },
+                ),
+            };
+        } else {
+            response = await Axios.get(`${backendAPI}/quality/settings/requirements`, {
+                params: {
+                    ...filter,
+                },
+            });
+        }
+    } catch (errorData) {
+        throw generateError(errorData);
+    }
+
+    response.data.results.count = response.data.count;
+    return response.data.results;
+}
+
+async function createQualityRequirement(
+    requirementData: SerializedQualityRequirementSaveData,
+): Promise<SerializedQualityRequirementData> {
+    const params = enableOrganization();
+    const { backendAPI } = config;
+
+    try {
+        const response = await Axios.post(`${backendAPI}/quality/settings/requirements`, requirementData, {
+            params,
+        });
+
+        return response.data;
+    } catch (errorData) {
+        throw generateError(errorData);
+    }
+}
+
+async function updateQualityRequirement(
+    requirementID: number,
+    requirementData: SerializedQualityRequirementSaveData,
+): Promise<SerializedQualityRequirementData> {
+    const params = enableOrganization();
+    const { backendAPI } = config;
+
+    try {
+        const response = await Axios.patch(
+            `${backendAPI}/quality/settings/requirements/${requirementID}`,
+            requirementData,
+            { params },
+        );
+
+        return response.data;
+    } catch (errorData) {
+        throw generateError(errorData);
+    }
+}
+
+async function deleteQualityRequirement(requirementID: number): Promise<void> {
+    const params = enableOrganization();
+    const { backendAPI } = config;
+
+    try {
+        await Axios.delete(`${backendAPI}/quality/settings/requirements/${requirementID}`, { params });
     } catch (errorData) {
         throw generateError(errorData);
     }
@@ -2531,6 +2730,7 @@ export default Object.freeze({
         userAgreements,
         installedApps,
         apiSchema: getApiSchema,
+        getAndResetBandwidthInfo,
     }),
 
     projects: Object.freeze({
@@ -2582,6 +2782,11 @@ export default Object.freeze({
         update: updateUser,
     }),
 
+    growth: Object.freeze({
+        get: getGrowthData,
+        update: updateGrowthData,
+    }),
+
     apiTokens: Object.freeze({
         get: getApiTokens,
         create: createApiToken,
@@ -2591,6 +2796,7 @@ export default Object.freeze({
 
     frames: Object.freeze({
         getData,
+        getAudioChunk,
         getMeta,
         saveMeta,
         getPreview,
@@ -2679,6 +2885,12 @@ export default Object.freeze({
             settings: Object.freeze({
                 get: getQualitySettings,
                 update: updateQualitySettings,
+            }),
+            requirements: Object.freeze({
+                get: getQualityRequirements,
+                create: createQualityRequirement,
+                update: updateQualityRequirement,
+                delete: deleteQualityRequirement,
             }),
         }),
     }),

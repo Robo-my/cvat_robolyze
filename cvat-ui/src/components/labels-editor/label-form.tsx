@@ -23,7 +23,7 @@ import { ColorizeIcon } from 'icons';
 import patterns from 'utils/validation-patterns';
 import config from 'config';
 import {
-    equalArrayHead, idGenerator, LabelOptColor, SkeletonConfiguration,
+    equalArrayHead, idGenerator, LabelOptColor, SkeletonConfiguration, validateNumberAttributeValues,
 } from './common';
 
 export enum AttributeType {
@@ -41,6 +41,7 @@ interface Props {
     onSkeletonSubmit?: () => SkeletonConfiguration | null;
     resetSkeleton?: () => void;
     onCancel: () => void;
+    showLabelType?: boolean;
 }
 
 type InputRef = React.ComponentRef<typeof Input>;
@@ -336,29 +337,10 @@ export default class LabelForm extends React.Component<Props> {
         const validator = (_: any, strNumbers: string): Promise<void> => {
             if (typeof strNumbers !== 'string') return Promise.resolve();
 
-            const numbers = strNumbers.split(';').map((number): number => Number.parseFloat(number));
-            if (numbers.length !== 3) {
-                return Promise.reject(new Error('Three numbers are expected'));
-            }
-
-            for (const number of numbers) {
-                if (Number.isNaN(number)) {
-                    return Promise.reject(new Error(`"${number}" is not a number`));
-                }
-            }
-
-            const [min, max, step] = numbers;
-
-            if (min >= max) {
-                return Promise.reject(new Error('Minimum must be less than maximum'));
-            }
-
-            if (max - min < step) {
-                return Promise.reject(new Error('Step must be less than minmax difference'));
-            }
-
-            if (step <= 0) {
-                return Promise.reject(new Error('Step must be a positive number'));
+            try {
+                validateNumberAttributeValues(strNumbers.split(';'));
+            } catch (error) {
+                return Promise.reject(error);
             }
 
             return Promise.resolve();
@@ -537,7 +519,13 @@ export default class LabelForm extends React.Component<Props> {
 
         return (
             <Form.Item name='type'>
-                <Select className='cvat-label-type-input' disabled={isSkeleton || locked} showSearch={false}>
+                <Select
+                    className='cvat-label-type-input'
+                    disabled={isSkeleton || locked}
+                    showSearch={false}
+                    popupMatchSelectWidth={false}
+                    dropdownStyle={{ minWidth: '150px' }}
+                >
                     {isSkeleton ? (
                         <Select.Option
                             className='cvat-label-type-option-skeleton'
@@ -654,7 +642,7 @@ export default class LabelForm extends React.Component<Props> {
     }
 
     public render(): JSX.Element {
-        const { label, onSkeletonSubmit } = this.props;
+        const { label, onSkeletonSubmit, showLabelType = true } = this.props;
         const isSkeleton = !!onSkeletonSubmit;
 
         return (
@@ -678,7 +666,9 @@ export default class LabelForm extends React.Component<Props> {
             >
                 <Row justify='start' align='top'>
                     <Col span={8}>{this.renderLabelNameInput()}</Col>
-                    <Col span={3} offset={1}>{this.renderLabelTypeInput()}</Col>
+                    {showLabelType && (
+                        <Col span={3} offset={1}>{this.renderLabelTypeInput()}</Col>
+                    )}
                     <Col span={3} offset={1}>
                         {this.renderChangeColorButton()}
                     </Col>
