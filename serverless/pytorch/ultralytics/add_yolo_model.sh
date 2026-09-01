@@ -196,3 +196,30 @@ patch (we hit this once during initial setup).
 EOF
     exit 1
 fi
+
+# ---- post-deploy: scan ALL live functions for port drift ----
+# Nuclio's recorded status.httpPort for a function can silently drift out of sync
+# with that function's container's ACTUAL Docker-published host port. When this
+# happens the function still shows 'ready'/healthy in `docker ps` and
+# `nuctl get functions`, but CVAT builds its invoke URL from nuclio's (stale) port,
+# so every auto-annotation call to that specific model fails with
+# "ConnectionRefusedError: host.docker.internal:<port>" while OTHER models keep
+# working fine -- easy to misdiagnose as task/upload-specific.
+# First observed 2026-07-01 on 3 of 6 already-deployed models (not the one just
+# deployed) with no confirmed trigger; this is a defensive scan run after every
+# deploy so drift on OLDER, untouched models gets caught proactively instead of
+# waiting for a user to hit it.
+info "Scanning all deployed functions for nuclio/docker port drift"
+DRIFTED=""
+for fn in $(nuctl get functions --platform local -o json 2>/dev/null \
+        | python3 -c "import json,sys; print('\n'.join(f['metadata']['name'] for f in json.load(sys.stdin)))" 2>/dev/null); do
+    nuclio_port="$(docker exec nuclio curl -s "http://localhost:8070/api/functions/$fn" \
+        | python3 -c "import json,sys; print(json.load(sys.stdin)['status'].get('httpPort',''))" 2>/dev/null)"
+    docker_port="$(docker port "nuclio-nuclio-${fn}" 2>/dev/null | grep -oP '(?<=:)\d+' | head -n1)"
+    if [ -n "$docker_port" ] && [ "$nuclio_port" != "$docker_port" ]; then
+        DRIFTED="$DRIFTED  - $fn (nuclio thinks port=$nuclio_port, container actually listens on $docker_port)\n"
+    fi
+done
+if [ -n "$DRIFTED" ]; then
+    printf '\nWARNING: port drift detected on other deployed function(s), CVAT auto-annotation will fail for these until redeployed:\n%b\nFix each with:\n  ./add_yolo_model.sh --weights <recovered.pt> --name "<name>" --slug <slug> --classes <classes> --force\n(recover weights first if the source .pt is gone: docker cp nuclio-nuclio-<slug>:/opt/nuclio/model.pt <path>)\n' "$DRIFTED" >&2
+fi

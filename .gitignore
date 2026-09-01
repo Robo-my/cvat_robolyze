@@ -80,3 +80,4 @@ cvat-ui/dist
 
 # YOLO/serverless model weights (do not commit binaries)
 serverless/**/*.pt
+cvat-models/**/*.pt
