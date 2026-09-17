@@ -1,0 +1,6 @@
+[Unit]
+Description=CVAT daily auto-stop (21:00 MYT)
+[Service]
+Type=oneshot
+ExecStart=/opt/cvat/cvat-autostop.sh
+TimeoutStartSec=2400

@@ -1,0 +1,16 @@
+[Unit]
+Description=CVAT (docker compose + serverless overlay + nuclio models)
+Requires=docker.service
+After=docker.service network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/opt/cvat/cvat-start.sh
+ExecStop=/opt/cvat/cvat-stop.sh
+TimeoutStartSec=900
+TimeoutStopSec=300
+
+[Install]
+WantedBy=multi-user.target

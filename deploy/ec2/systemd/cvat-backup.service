@@ -1,0 +1,9 @@
+[Unit]
+Description=CVAT backup to NAS
+After=cvat.service
+[Service]
+Type=oneshot
+ExecStart=/opt/cvat/cvat-backup.sh
+TimeoutStartSec=6h
+Nice=10
+IOSchedulingClass=idle

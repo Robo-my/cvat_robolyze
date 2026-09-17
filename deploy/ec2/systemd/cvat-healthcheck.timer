@@ -1,0 +1,6 @@
+[Unit]
+Description=CVAT health check 3 min after boot
+[Timer]
+OnBootSec=3min
+[Install]
+WantedBy=timers.target

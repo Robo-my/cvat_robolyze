@@ -1,0 +1,8 @@
+[Unit]
+Description=CVAT backup to NAS at 13:00 and 20:30 Malaysia time
+[Timer]
+OnCalendar=*-*-* 13:00:00 Asia/Kuala_Lumpur
+OnCalendar=*-*-* 20:30:00 Asia/Kuala_Lumpur
+Persistent=false
+[Install]
+WantedBy=timers.target

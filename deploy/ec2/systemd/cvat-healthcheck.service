@@ -1,0 +1,6 @@
+[Unit]
+Description=CVAT health check
+After=cvat.service
+[Service]
+Type=oneshot
+ExecStart=/opt/cvat/cvat-healthcheck.sh
