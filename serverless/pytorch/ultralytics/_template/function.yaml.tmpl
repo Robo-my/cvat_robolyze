@@ -33,6 +33,9 @@ spec:
       workerAvailabilityTimeoutMilliseconds: 10000
       attributes:
         maxRequestBodySize: 33554432 # 32MB
+        # Fixed host port: an auto-assigned one changes on every docker/host restart,
+        # leaving nuclio's recorded port stale and breaking CVAT invocations.
+        port: {{PORT}}
 
   platform:
     attributes:

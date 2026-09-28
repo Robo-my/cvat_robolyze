@@ -7,8 +7,10 @@
 #       --name "Road Defects" \
 #       --slug road_defects \
 #       --classes cracks,potholes,raveling,sw \
-#       [--threshold 0.25] [--force]
+#       [--threshold 0.25] [--port 49100] [--force]
 #
+# --port pins the function's host port (default: keep the model's previous port,
+# else the lowest free port from 49100). Pinned ports survive host reboots.
 # Teammates: scp your .pt to the server first, then point --weights at it.
 # IMPORTANT: --classes order MUST match the model's training class order,
 # otherwise predictions get the wrong labels.
@@ -25,6 +27,8 @@ NAME=""
 SLUG=""
 CLASSES=""
 THRESHOLD="0.25"
+PORT=""
+PORT_BASE=49100
 FORCE=0
 
 die() { echo "ERROR: $*" >&2; exit 1; }
@@ -43,6 +47,7 @@ while [ $# -gt 0 ]; do
         --slug)      SLUG="${2:-}"; shift 2;;
         --classes)   CLASSES="${2:-}"; shift 2;;
         --threshold) THRESHOLD="${2:-}"; shift 2;;
+        --port)      PORT="${2:-}"; shift 2;;
         --force)     FORCE=1; shift;;
         -h|--help)   usage 0;;
         *) die "Unknown argument: $1 (use --help)";;
@@ -125,6 +130,32 @@ if ! docker image inspect "$ALPINE_TAG" >/dev/null 2>&1; then
     info "Tagged $LOCAL_ALPINE -> $ALPINE_TAG"
 fi
 
+# ---- choose a fixed host port ----
+# Ports pinned by the other deployed models (read before this slug's dir is replaced).
+port_of() { grep -oP '^\s+port:\s*\K[0-9]+' "$1" 2>/dev/null | head -n1; }
+if [ -z "$PORT" ]; then
+    PORT="$(port_of "$FUNC_DIR/function.yaml" || true)"
+fi
+USED_PORTS=""
+for f in "$SCRIPT_DIR"/*/nuclio/function.yaml; do
+    [ "$f" = "$FUNC_DIR/function.yaml" ] && continue
+    USED_PORTS="$USED_PORTS $(port_of "$f" || true)"
+done
+port_busy() {
+    echo " $USED_PORTS " | grep -q " $1 " && return 0
+    # bound on the host by something other than this function's current container
+    ss -Htln "sport = :$1" 2>/dev/null | grep -q . \
+        && ! docker port "nuclio-nuclio-$FUNC_NAME" 2>/dev/null | grep -q ":$1\$"
+}
+if [ -n "$PORT" ]; then
+    echo "$PORT" | grep -Eq '^[0-9]+$' || die "invalid --port '$PORT'"
+    port_busy "$PORT" && die "port $PORT is already used by another model or process"
+else
+    PORT=$PORT_BASE
+    while port_busy "$PORT"; do PORT=$((PORT+1)); done
+fi
+info "Using fixed host port $PORT"
+
 # ---- render template ----
 info "Rendering function into $FUNC_DIR"
 rm -rf "$SCRIPT_DIR/$SLUG"
@@ -133,13 +164,13 @@ cp "$TEMPLATE_DIR/main.py" "$FUNC_DIR/main.py"
 cp "$WEIGHTS" "$FUNC_DIR/model.pt"
 
 # Use python for safe placeholder substitution (NAME/SPEC may contain spaces/quotes).
-NAME="$NAME" SLUG="$SLUG" SPEC_JSON="$SPEC_JSON" \
+NAME="$NAME" SLUG="$SLUG" SPEC_JSON="$SPEC_JSON" PORT="$PORT" \
 python3 - "$TEMPLATE_DIR/function.yaml.tmpl" "$FUNC_DIR/function.yaml" <<'PY'
 import os, sys
 src, dst = sys.argv[1], sys.argv[2]
 with open(src) as f:
     text = f.read()
-for key in ("NAME", "SLUG", "SPEC_JSON"):
+for key in ("NAME", "SLUG", "SPEC_JSON", "PORT"):
     text = text.replace("{{%s}}" % key, os.environ[key])
 with open(dst, "w") as f:
     f.write(text)

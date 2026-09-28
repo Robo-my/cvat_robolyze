@@ -22,12 +22,16 @@ services:
   cvat_server:
     environment:
       CVAT_SERVERLESS: 1
-      CVAT_NUCLIO_INVOKE_METHOD: dashboard
+      # direct = POST to host.docker.internal:<function port>. Model ports are pinned by
+      # add_yolo_model.sh, so they survive restarts. "dashboard" mode breaks after a host
+      # reboot: nuclio invokes the container IP recorded at deploy time, and Docker
+      # reassigns those IPs on restart.
+      CVAT_NUCLIO_INVOKE_METHOD: direct
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
   cvat_worker_annotation:
     environment:
-      CVAT_NUCLIO_INVOKE_METHOD: dashboard
+      CVAT_NUCLIO_INVOKE_METHOD: direct
     extra_hosts:
       - "host.docker.internal:host-gateway"
