@@ -1,0 +1,62 @@
+--- a/base.py	2026-09-28 15:59:34.958085281 +0800
++++ b/base.py	2026-09-28 15:59:59.526197757 +0800
+@@ -199,7 +199,13 @@
+         #
+         # To support more subset names, we disallow subsets
+         # called 'classes', 'names' and 'backup'.
+-        return [k for k in self._config if k not in self.RESERVED_CONFIG_KEYS]
++        # A subset value is a path (str) or a list of paths; any other type (e.g. a stray
++        # scalar like `nc: 5`) is config metadata, not a subset.
++        return [
++            k
++            for k, v in self._config.items()
++            if k not in self.RESERVED_CONFIG_KEYS and isinstance(v, (str, list))
++        ]
+ 
+     def _get_lazy_subset_items(self, subset_name: str):
+         return {
+@@ -432,6 +438,17 @@
+         rel_image_path = osp.relpath(image_path, self._path)
+         split_rel_path = rel_image_path.split(osp.sep, 2)
+         if (
++            len(split_rel_path) == 2
++            and split_rel_path[0] == YoloUltralyticsPath.IMAGES_FOLDER_NAME
++        ):
++            # Flat layout: images/<file>.ext -> labels/<file>.txt (cvat#8973). Datasets not
++            # produced by CVAT often have no <subset> level.
++            return osp.join(
++                self._path,
++                YoloUltralyticsPath.LABELS_FOLDER_NAME,
++                osp.splitext(split_rel_path[1])[0] + YoloUltralyticsPath.LABELS_EXT,
++            )
++        if (
+             len(split_rel_path) < 3
+             or YoloUltralyticsPath.IMAGES_FOLDER_NAME not in split_rel_path[:2]
+         ):
+@@ -461,6 +478,14 @@
+         parts = split_path(path)
+         if 2 < len(parts) and not osp.isabs(path):
+             path = osp.join(*parts[2:])  # pylint: disable=no-value-for-parameter
++        elif (
++            len(parts) == 2
++            and parts[0] == YoloUltralyticsPath.IMAGES_FOLDER_NAME
++            and not osp.isabs(path)
++        ):
++            # Flat layout (see _get_labels_path_from_image_path): strip the "images/" prefix so
++            # item ids still match CVAT frame names.
++            path = parts[1]
+         return osp.splitext(path)[0]
+ 
+     def _get_subset_image_paths(self, subset_name: str):
+--- a/format.py	2026-09-28 15:59:35.359088376 +0800
++++ b/format.py	2026-09-28 15:59:59.525971312 +0800
+@@ -19,6 +19,9 @@
+         "path",
+         "kpt_shape",
+         "flip_idx",
++        # Standard Ultralytics key for the number of classes. Without this it is read as a
++        # subset whose image list is an int -> "'int' object is not iterable" (cvat#8958).
++        "nc",
+     ]
+     IMAGES_FOLDER_NAME = "images"
+     LABELS_FOLDER_NAME = "labels"

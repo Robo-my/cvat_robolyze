@@ -1,0 +1,35 @@
+# CVAT server image with the Robolyze fixes baked in.
+# Build with deploy/ec2/build-server-image.sh (sets CVAT_BASE and the build context).
+ARG CVAT_BASE=v2.74.0
+FROM cvat/server:${CVAT_BASE}
+
+USER root
+
+# 1) Export lock timeout: cvat/apps/engine/cache.py holds a redis lock across a write into the
+#    on-disk media cache; under load the 60s default expires and the export dies.
+#    NOTE: v2.74 serves the app from /opt/cvat (v2.66 used /home/django/cvat).
+COPY cache.py /opt/cvat/cvat/apps/engine/cache.py
+
+# 2) datumaro YOLO reader fixes (upstream cvat#8958 / cvat#8973, both still open):
+#    - `nc:` in data.yaml read as a subset -> "'int' object is not iterable"
+#    - flat images/<file> layout rejected as "Malformed folder structure"
+#    The image has no `patch` binary, so the edits are applied by a python script that is
+#    idempotent and fails the build if datumaro's code changed (see patches/*.patch for the diff).
+COPY apply_datumaro_yolo_patch.py /tmp/
+RUN set -eux; \
+    python3 /tmp/apply_datumaro_yolo_patch.py; \
+    rm /tmp/apply_datumaro_yolo_patch.py; \
+    chown django:django /opt/cvat/cvat/apps/engine/cache.py
+
+# Fail the build (not a user's import) if either fix is missing.
+RUN set -eux; \
+    grep -q 'timeout=600' /opt/cvat/cvat/apps/engine/cache.py; \
+    python3 -c "\
+from datumaro.plugins.data_formats.yolo.format import YoloUltralyticsPath as P; \
+assert 'nc' in P.RESERVED_CONFIG_KEYS, 'datumaro nc patch missing'; \
+from datumaro.plugins.data_formats.yolo.base import YoloUltralyticsDetectionBase as B; \
+import inspect; src = inspect.getsource(B._get_labels_path_from_image_path); \
+assert 'Flat layout' in src, 'datumaro flat-layout patch missing'; \
+print('patch assertions ok')"
+
+USER django

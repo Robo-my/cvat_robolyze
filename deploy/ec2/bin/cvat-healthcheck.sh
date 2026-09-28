@@ -24,6 +24,16 @@ sys.exit(1 if bad or not funcs else 0)
 PY
 ); echo "$res" | grep -q "^models [0-9]*/[0-9]* ok" && ! echo "$res" | grep -q "MODEL FAIL" && ! echo "$res" | grep -q "^models 0/" || fail=1
 msgs+=("$res")
+# image patches must survive rebuilds (datumaro YOLO import fixes + export lock timeout)
+patch=$(docker exec cvat_server python3 -c "
+from datumaro.plugins.data_formats.yolo.format import YoloUltralyticsPath as P
+from datumaro.plugins.data_formats.yolo.base import YoloUltralyticsDetectionBase as B
+import inspect
+ok = 'nc' in P.RESERVED_CONFIG_KEYS and 'Flat layout' in inspect.getsource(B._get_labels_path_from_image_path)
+ok = ok and 'timeout=600' in open('/opt/cvat/cvat/apps/engine/cache.py').read()
+print('image patches ok' if ok else 'IMAGE PATCHES MISSING (rebuild with deploy/ec2/build-server-image.sh)')" 2>&1 | tail -1)
+msgs+=("$patch"); case "$patch" in *MISSING*|*Error*|*error*) fail=1;; esac
+
 [ -f /var/lib/cvat-backup/NAS_PENDING ] && msgs+=("WARNING: NAS unreachable at last backup; local copies pending: $(cat /var/lib/cvat-backup/NAS_PENDING)")
 { echo "$(date -Is) status=$([ $fail = 0 ] && echo OK || echo FAIL)"; printf '%s\n' "${msgs[@]}"; } | tee $OUT
 exit $fail
