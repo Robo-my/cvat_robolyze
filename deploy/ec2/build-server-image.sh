@@ -14,7 +14,7 @@ echo ">> pulling cvat/server:$BASE"
 docker pull -q "cvat/server:$BASE"
 
 if docker image inspect cvat/server:dev >/dev/null 2>&1; then
-    prev="cvat/server:$(docker run --rm --entrypoint python3 cvat/server:dev -c 'import cvat;print(cvat.__version__)' 2>/dev/null || echo unknown)-prepatch"
+    prev="cvat/server:$(docker run --rm --entrypoint python3 cvat/server:dev -c 'import cvat;print(cvat.__version__)' 2>/dev/null || echo unknown)-patched-prev"
     docker tag cvat/server:dev "$prev"; echo ">> previous image kept as $prev"
 fi
 
