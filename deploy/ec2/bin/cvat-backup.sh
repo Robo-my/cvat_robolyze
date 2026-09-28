@@ -1,5 +1,6 @@
 #!/bin/bash
-# CVAT backup -> NAS (//192.168.0.32/robomy/cvat_backups), reached via the Tailscale subnet route on robomyserver-1.
+# CVAT backup -> the NAS share (default //192.168.0.20/robomy/cvat_backups; the IP is rediscovered if it
+# changes), reached via the Tailscale subnet route advertised by robomyserver-1.
 # Every run: full DB dump + keys + .env (secrets like TAILSCALE_AUTH_KEY stripped) + row counts + media id list.
 # Media: per-directory tars, only for dirs new/changed since last successful upload (fingerprint = count+bytes+max mtime).
 # Models (serverless weights + cvat-models/): one tar, only when changed.
@@ -10,13 +11,46 @@ exec 9>/run/cvat-backup.lock
 flock -n 9 || { echo "backup already running"; exit 0; }
 
 # NAS share + credentials live on the host only (not in git): /etc/cvat-backup.conf, mode 600, e.g.
-#   NAS=//192.168.0.32/robomy
+#   NAS_IP=192.168.0.20
+#   NAS_SHARE=robomy
 #   NASUSER='<user>%<password>'
 #   ROOT=cvat_backups
+#   NAS_SUBNET=192.168.0          # optional, for rediscovery when the NAS IP changes
 CONF=/etc/cvat-backup.conf
-[ -r "$CONF" ] || { echo "missing $CONF (NAS, NASUSER, ROOT)"; exit 1; }
+[ -r "$CONF" ] || { echo "missing $CONF (NAS_IP, NAS_SHARE, NASUSER)"; exit 1; }
 . "$CONF"
-: "${NAS:?set in $CONF}" "${NASUSER:?set in $CONF}"; ROOT=${ROOT:-cvat_backups}
+: "${NASUSER:?set in $CONF}"; ROOT=${ROOT:-cvat_backups}
+# accept the older NAS=//ip/share form
+if [ -z "${NAS_IP:-}" ] && [ -n "${NAS:-}" ]; then
+    NAS_IP=$(echo "$NAS" | sed -E 's|^//([^/]+)/.*|\1|'); NAS_SHARE=${NAS_SHARE:-$(echo "$NAS" | sed -E 's|^//[^/]+/||')}
+fi
+: "${NAS_IP:?set in $CONF}" "${NAS_SHARE:?set in $CONF}"
+NAS_SUBNET=${NAS_SUBNET:-$(echo "$NAS_IP" | cut -d. -f1-3)}
+
+nas_share_ok() { timeout 15 smbclient "//$1/$NAS_SHARE" -U "$NASUSER" -c "ls $ROOT" >/dev/null 2>&1; }
+
+find_nas() {
+    # The NAS is on DHCP and its address can change; rediscover it on the LAN reached through the
+    # Tailscale subnet route (SMB name resolution is broadcast-based and does not cross that route).
+    local ip
+    for ip in $(seq 1 254); do
+        ( timeout 1 bash -c "echo > /dev/tcp/$NAS_SUBNET.$ip/445" 2>/dev/null && echo "$NAS_SUBNET.$ip" ) &
+    done | sort -u | while read -r ip; do
+        nas_share_ok "$ip" && { echo "$ip"; break; }
+    done
+    wait 2>/dev/null || true
+}
+
+if ! nas_share_ok "$NAS_IP"; then
+    found=$(find_nas | head -1)
+    if [ -n "$found" ]; then
+        echo "$(date +%T) NAS moved: $NAS_IP -> $found (updating $CONF)"
+        sed -i -E "s|^NAS_IP=.*|NAS_IP=$found|" "$CONF" || true
+        grep -q '^NAS_IP=' "$CONF" || echo "NAS_IP=$found" >> "$CONF"
+        NAS_IP=$found
+    fi
+fi
+NAS="//$NAS_IP/$NAS_SHARE"
 REPO=/home/ubuntu/cvat_robolyze
 MEDIA=/var/lib/docker/volumes/cvat_cvat_data/_data/data
 STATE=/var/lib/cvat-backup; LOCAL=/var/backups/cvat
@@ -62,7 +96,7 @@ fi
 echo "$TS" >> $STATE/pending_runs
 
 # ---- 4. upload to NAS (all pending runs + media/model tars not yet uploaded) ----
-if ! timeout 20 smbclient -L 192.168.0.32 -U "$NASUSER" >/dev/null 2>&1; then
+if ! nas_share_ok "$NAS_IP"; then
   log "NAS UNREACHABLE - kept locally in $RUN"
   wc -l < $STATE/pending_runs > $STATE/NAS_PENDING
   # keep local disk bounded: last 10 runs

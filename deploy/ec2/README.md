@@ -19,7 +19,7 @@ Scripts are installed to `/opt/cvat/`, units to `/etc/systemd/system/`. The repo
 | `cvat-backup.timer` | 13:00 and 20:30 Asia/Kuala_Lumpur | `cvat-backup.sh`: see below. |
 
 ## Backups (`cvat-backup.sh`)
-Target: `//192.168.0.32/robomy/cvat_backups/` (WD My Cloud NAS). The share and credentials are read from
+Target: `//<nas>/robomy/cvat_backups/` (WD My Cloud Mirror, DHCP: the script rediscovers the IP on the LAN prefix if it moves). The share and credentials are read from
 `/etc/cvat-backup.conf` (mode 600, host only, never committed; see `cvat-backup.conf.example`). The EC2 reaches it through the Tailscale
 subnet route `192.168.0.0/24`, advertised by robomyserver-1; the EC2 runs `tailscale up --accept-routes`.
 

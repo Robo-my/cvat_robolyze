@@ -1,4 +1,7 @@
 # Copy to /etc/cvat-backup.conf (mode 600). Do not commit real credentials.
-NAS=//192.168.0.32/robomy
+NAS_IP=192.168.0.20
+NAS_SHARE=robomy
 NASUSER='<user>%<password>'
 ROOT=cvat_backups
+# Optional: LAN prefix used to rediscover the NAS if its DHCP address changes.
+NAS_SUBNET=192.168.0
