@@ -11,6 +11,35 @@ sudo deploy/ec2/install.sh
 Scripts are installed to `/opt/cvat/`, units to `/etc/systemd/system/`. The repo is expected at
 `/home/ubuntu/cvat_robolyze`.
 
+## Email (invitations, password resets)
+
+CVAT ships `EMAIL_BACKEND = None`, so organization invitations fail with *"Email backend is not
+configured."* `cvat/settings/robolyze.py` (baked into the image) adds an env-driven SMTP backend and
+is activated by `components/email/docker-compose.email.yml`, which `cvat-start.sh` always passes.
+
+Set these in the host `.env` (mode 600, gitignored — never commit them):
+
+| key | value used here |
+|---|---|
+| `EMAIL_HOST` / `EMAIL_PORT` / `EMAIL_USE_TLS` | `smtp.gmail.com` / `587` / `true` |
+| `EMAIL_HOST_USER` / `EMAIL_HOST_PASSWORD` | the Gmail account + **app password** |
+| `DEFAULT_FROM_EMAIL` | `CVAT Robolyze <…>` |
+| `ACCOUNT_EMAIL_VERIFICATION` | `optional` (`none`/`mandatory` also valid) |
+
+To switch provider, change those values only. Links in the mail come from the Django **sites** row,
+not from `.env`: it must not be `example.com`, or every link is wrong.
+
+```bash
+docker exec -w /opt/cvat cvat_server python3 -c "
+import django; django.setup()
+from django.contrib.sites.models import Site
+Site.objects.update_or_create(pk=1, defaults={'domain':'100.68.135.83:8080','name':'CVAT Robolyze'})"
+```
+
+The health check verifies the backend and the sites row (`email backend ok …`). Inviting an address
+that belongs to more than one user account fails with HTTP 500 (`More than one user has this email`)
+— that is a CVAT constraint, not a mail problem.
+
 | Unit | When | What |
 |---|---|---|
 | `cvat.service` | boot | `cvat-start.sh`: `docker compose` with **both** `docker-compose.yml` and `components/serverless/docker-compose.serverless.yml`, then starts the nuclio model containers. On stop, `cvat-stop.sh` shuts the stack down cleanly. |

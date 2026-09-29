@@ -34,6 +34,20 @@ ok = ok and 'timeout=600' in open('/opt/cvat/cvat/apps/engine/cache.py').read()
 print('image patches ok' if ok else 'IMAGE PATCHES MISSING (rebuild with deploy/ec2/build-server-image.sh)')" 2>&1 | tail -1)
 msgs+=("$patch"); case "$patch" in *MISSING*|*Error*|*error*) fail=1;; esac
 
+# email backend (invitations / password resets) must stay configured
+mail=$(docker exec cvat_server python3 -c "
+import django; django.setup()
+from django.conf import settings
+from django.contrib.sites.models import Site
+site = Site.objects.get(pk=settings.SITE_ID).domain
+ok = (bool(settings.EMAIL_BACKEND) and 'console' not in settings.EMAIL_BACKEND
+      and bool(settings.DEFAULT_FROM_EMAIL) and 'example.com' not in site)
+print(f'email backend ok (from {settings.DEFAULT_FROM_EMAIL}, links {site})' if ok
+      else f'EMAIL BACKEND NOT CONFIGURED (backend={settings.EMAIL_BACKEND}, site={site})')" 2>&1 | tail -1)
+msgs+=("$mail")
+# anything other than the explicit ok line is a failure (a traceback must not read as healthy)
+case "$mail" in "email backend ok"*) ;; *) fail=1;; esac
+
 [ -f /var/lib/cvat-backup/NAS_PENDING ] && msgs+=("WARNING: NAS unreachable at last backup; local copies pending: $(cat /var/lib/cvat-backup/NAS_PENDING)")
 { echo "$(date -Is) status=$([ $fail = 0 ] && echo OK || echo FAIL)"; printf '%s\n' "${msgs[@]}"; } | tee $OUT
 exit $fail

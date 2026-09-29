@@ -15,15 +15,26 @@ COPY cache.py /opt/cvat/cvat/apps/engine/cache.py
 #    - flat images/<file> layout rejected as "Malformed folder structure"
 #    The image has no `patch` binary, so the edits are applied by a python script that is
 #    idempotent and fails the build if datumaro's code changed (see patches/*.patch for the diff).
+# 2) Email backend: CVAT ships EMAIL_BACKEND = None, so invitations/password resets fail with
+#    "Email backend is not configured." Activated by DJANGO_SETTINGS_MODULE=cvat.settings.robolyze
+#    (components/email/docker-compose.email.yml); all values come from the environment.
+COPY robolyze.py /opt/cvat/cvat/settings/robolyze.py
+
 COPY apply_datumaro_yolo_patch.py /tmp/
 RUN set -eux; \
     python3 /tmp/apply_datumaro_yolo_patch.py; \
     rm /tmp/apply_datumaro_yolo_patch.py; \
-    chown django:django /opt/cvat/cvat/apps/engine/cache.py
+    chown django:django /opt/cvat/cvat/apps/engine/cache.py /opt/cvat/cvat/settings/robolyze.py
 
 # Fail the build (not a user's import) if either fix is missing.
 RUN set -eux; \
     grep -q 'timeout=600' /opt/cvat/cvat/apps/engine/cache.py; \
+    CVAT_EVENTS_LOCAL_DB_FILENAME=build-check.db DJANGO_SECRET_KEY=build-check \
+    DJANGO_SETTINGS_MODULE=cvat.settings.robolyze python3 -c "\
+from django.conf import settings; \
+assert settings.EMAIL_BACKEND, 'email backend not configured'; \
+print('email settings module ok')"; \
+    rm -f /home/django/events/build-check.db; \
     python3 -c "\
 from datumaro.plugins.data_formats.yolo.format import YoloUltralyticsPath as P; \
 assert 'nc' in P.RESERVED_CONFIG_KEYS, 'datumaro nc patch missing'; \
@@ -31,5 +42,9 @@ from datumaro.plugins.data_formats.yolo.base import YoloUltralyticsDetectionBase
 import inspect; src = inspect.getsource(B._get_labels_path_from_image_path); \
 assert 'Flat layout' in src, 'datumaro flat-layout patch missing'; \
 print('patch assertions ok')"
+
+# The assertions above run as root and create dirs/files under /home/django (events/, data/);
+# hand them back or the container crash-loops on PermissionError for events.db.
+RUN chown -R django:django /home/django
 
 USER django

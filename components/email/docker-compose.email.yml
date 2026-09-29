@@ -1,0 +1,41 @@
+# Email backend for CVAT (invitations, password resets, verification).
+#
+# Usage (always together with the base file; the serverless overlay is required too):
+#   docker compose -f docker-compose.yml \
+#                  -f components/serverless/docker-compose.serverless.yml \
+#                  -f components/email/docker-compose.email.yml up -d
+# deploy/ec2/bin/cvat-start.sh does this for you.
+#
+# Values come from the host .env (gitignored) - no credentials belong in this file:
+#   EMAIL_HOST_USER, EMAIL_HOST_PASSWORD, EMAIL_HOST, EMAIL_PORT, EMAIL_USE_TLS,
+#   DEFAULT_FROM_EMAIL, ACCOUNT_EMAIL_VERIFICATION
+services:
+  cvat_server:
+    environment: &email-env
+      DJANGO_SETTINGS_MODULE: cvat.settings.robolyze
+      EMAIL_HOST: ${EMAIL_HOST:-smtp.gmail.com}
+      EMAIL_PORT: ${EMAIL_PORT:-587}
+      EMAIL_USE_TLS: ${EMAIL_USE_TLS:-true}
+      EMAIL_USE_SSL: ${EMAIL_USE_SSL:-false}
+      EMAIL_HOST_USER: ${EMAIL_HOST_USER:-}
+      EMAIL_HOST_PASSWORD: ${EMAIL_HOST_PASSWORD:-}
+      EMAIL_TIMEOUT: ${EMAIL_TIMEOUT:-20}
+      DEFAULT_FROM_EMAIL: ${DEFAULT_FROM_EMAIL:-}
+      ACCOUNT_EMAIL_VERIFICATION: ${ACCOUNT_EMAIL_VERIFICATION:-optional}
+
+  cvat_worker_annotation:
+    environment: *email-env
+  cvat_worker_chunks:
+    environment: *email-env
+  cvat_worker_consensus:
+    environment: *email-env
+  cvat_worker_export:
+    environment: *email-env
+  cvat_worker_import:
+    environment: *email-env
+  cvat_worker_quality_reports:
+    environment: *email-env
+  cvat_worker_utils:
+    environment: *email-env
+  cvat_worker_webhooks:
+    environment: *email-env
