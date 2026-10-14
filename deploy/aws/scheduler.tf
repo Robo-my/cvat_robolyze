@@ -61,6 +61,12 @@ variable "snapshot_time_utc" {
   default     = "15:45"
 }
 
+variable "enable_snapshots" {
+  type        = bool
+  description = "Create a DLM policy for daily EBS snapshots. Off by default: this AWS organization denies DLM via a service control policy."
+  default     = false
+}
+
 variable "snapshot_retain_count" {
   type    = number
   default = 7
@@ -257,6 +263,8 @@ resource "aws_cloudwatch_event_target" "state_change" {
 # --- Daily EBS snapshots ----------------------------------------------------
 
 resource "aws_ec2_tag" "backup" {
+  count = var.enable_snapshots ? 1 : 0
+
   resource_id = var.instance_id
   key         = "${var.name_prefix}-backup"
   value       = "daily"
@@ -273,23 +281,29 @@ data "aws_iam_policy_document" "dlm_assume" {
 }
 
 resource "aws_iam_role" "dlm" {
+  count = var.enable_snapshots ? 1 : 0
+
   name               = "${var.name_prefix}-dlm"
   assume_role_policy = data.aws_iam_policy_document.dlm_assume.json
 }
 
 resource "aws_iam_role_policy_attachment" "dlm" {
-  role       = aws_iam_role.dlm.name
+  count = var.enable_snapshots ? 1 : 0
+
+  role       = aws_iam_role.dlm[0].name
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSDataLifecycleManagerServiceRole"
 }
 
 resource "aws_dlm_lifecycle_policy" "snapshots" {
+  count = var.enable_snapshots ? 1 : 0
+
   description        = "Daily snapshots of the CVAT instance volumes"
-  execution_role_arn = aws_iam_role.dlm.arn
+  execution_role_arn = aws_iam_role.dlm[0].arn
   state              = "ENABLED"
 
   policy_details {
     resource_types = ["INSTANCE"]
-    target_tags    = { (aws_ec2_tag.backup.key) = aws_ec2_tag.backup.value }
+    target_tags    = { (aws_ec2_tag.backup[0].key) = aws_ec2_tag.backup[0].value }
 
     schedule {
       name      = "daily"

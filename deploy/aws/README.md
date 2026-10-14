@@ -6,7 +6,7 @@ This folder contains:
 
 | File | What it does |
 |---|---|
-| `scheduler.tf` | Creates the following in AWS:<br>• EventBridge Scheduler start/stop schedules (Asia/Kolkata)<br>• a least-privilege IAM role<br>• alerts for failed starts (SNS email)<br>• a status-check alarm<br>• daily EBS snapshots (DLM) |
+| `scheduler.tf` | Creates the following in AWS:<br>• EventBridge Scheduler start/stop schedules (Asia/Kolkata)<br>• a least-privilege IAM role<br>• alerts for failed starts (SNS email)<br>• a status-check alarm<br>• optional daily EBS snapshots (DLM, off by default) |
 | `host-setup.sh` | One-time host setup:<br>• enables `docker` and `tailscaled` at boot<br>• lets Postgres shut down cleanly<br>• lists containers that won't restart after boot |
 | `docker-compose.tuning.yml` | More server and chunk-worker processes, so job opening doesn't queue. |
 | `diagnose.sh` | Shows where a slow host spends its time: CPU per container, RQ queue lengths, disk, and Tailscale direct vs relay. |
@@ -53,6 +53,7 @@ Defaults, all overridable with `-var`:
 | `start_cron` | `cron(20 6 * * ? *)` | Start at 06:20 IST. Boot and containers take about 3–5 min, so CVAT is ready by 06:30. |
 | `stop_cron` | `cron(0 21 * * ? *)` | Stop at 21:00 IST. |
 | `timezone` | `Asia/Kolkata` | Time zone for both cron expressions. |
+| `enable_snapshots` | `false` | Daily EBS snapshots through DLM. Off because this AWS organization denies DLM with a service control policy. |
 | `snapshot_time_utc` | `15:45` | 21:15 IST. DLM only accepts UTC. |
 | `notify_state_changes` | `true` | Email at every start and stop. A missing morning email means something is wrong. |
 
