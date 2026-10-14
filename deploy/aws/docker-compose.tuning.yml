@@ -1,0 +1,19 @@
+# Tuning for a single 8 vCPU / 32 GB CVAT host with ~5-13 concurrent annotators.
+#
+# Use it together with the main compose file(s) on every compose command:
+#   docker compose -f docker-compose.yml -f deploy/aws/docker-compose.tuning.yml up -d
+#
+# Also set CVAT_ALLOW_STATIC_CACHE=yes in the .env file next to docker-compose.yml.
+# It is read by every backend container (task creation runs in the import worker),
+# so it is set there rather than here.
+
+services:
+  cvat_server:
+    environment:
+      NUMPROCS: 4
+
+  # Builds frame chunks when a job is opened and the chunk is not cached yet.
+  # The default of 2 makes users queue behind each other when several open jobs at once.
+  cvat_worker_chunks:
+    environment:
+      NUMPROCS: 4
